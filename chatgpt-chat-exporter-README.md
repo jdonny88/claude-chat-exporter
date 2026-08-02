@@ -110,14 +110,14 @@ If ChatGPT's interface changes, update the `SELECTORS` object:
 
 ```javascript
 const SELECTORS = {
-  conversationTurn: 'article[data-testid^="conversation-turn"], div[data-testid^="conversation-turn"]',
-  authorRole: '[data-message-author-role]',
+  message: '[data-message-author-role]',
   copyButton: 'button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]',
+  assistantMarkdown: '.markdown, .prose',
   userMessageText: '.whitespace-pre-wrap'
 };
 ```
 
-The `authorRole` selector is what distinguishes user from assistant turns — ChatGPT tags every message container with `data-message-author-role`.
+The `message` selector is the backbone: ChatGPT tags every message container with `data-message-author-role` (`user` / `assistant`) and a `data-message-id`, which the script uses both to label speakers and to dedupe turns while scrolling. If an export fails with "No messages found", the script logs **selector diagnostics** to the console showing which candidate selectors matched — use that to spot what changed.
 
 ## Troubleshooting
 

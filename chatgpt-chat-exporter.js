@@ -4,15 +4,15 @@ function setupChatGPTExporter() {
   let interceptorActive = true;
   let clipboardResolver = null;
 
-  // DOM Selectors - easily modifiable if ChatGPT's UI changes
+  // DOM Selectors - easily modifiable if ChatGPT's UI changes.
+  // The primary anchor is data-message-author-role, which ChatGPT puts on
+  // every message container and has kept stable across many UI revisions.
   const SELECTORS = {
-    // Each conversation turn is an <article> (older builds used a plain div).
-    conversationTurn: 'article[data-testid^="conversation-turn"], div[data-testid^="conversation-turn"]',
-    // The role attribute lives on the message container inside each turn.
-    authorRole: '[data-message-author-role]',
-    // Assistant (and, on newer builds, user) turns expose a copy button.
+    message: '[data-message-author-role]',
+    // Ancestors searched (nearest first) to find a turn's copy button.
     copyButton: 'button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]',
-    // Fallback for reading a user message directly when it has no copy button.
+    // Fallbacks for reading content directly from the DOM.
+    assistantMarkdown: '.markdown, .prose',
     userMessageText: '.whitespace-pre-wrap'
   };
 
@@ -24,7 +24,7 @@ function setupChatGPTExporter() {
 
   const SCROLL = {
     maxSteps: 400,       // Hard cap on scroll iterations (safety valve)
-    stableRounds: 3      // Stop once the turn count holds steady this many rounds
+    stableRounds: 3      // Stop once no new turns appear this many rounds at the bottom
   };
 
   function downloadMarkdown(content, filename) {
@@ -72,8 +72,7 @@ function setupChatGPTExporter() {
   }
 
   // Intercept clipboard writes so a copy button click can be captured, then
-  // still forward to the real clipboard so the user's clipboard is untouched
-  // in spirit (restored fully on cleanup).
+  // still forward to the real clipboard (fully restored on cleanup).
   navigator.clipboard.writeText = function(text) {
     if (interceptorActive && text && clipboardResolver) {
       const resolve = clipboardResolver;
@@ -117,70 +116,129 @@ function setupChatGPTExporter() {
     statusDiv.textContent = `You: ${you} | ChatGPT: ${gpt}`;
   }
 
-  // Find the scrollable conversation container. ChatGPT virtualizes long
-  // chats, removing off-screen turns from the DOM, so we scroll it top to
-  // bottom first to force every turn to render before capturing.
+  // Log how many elements each candidate selector matches, so a "nothing
+  // found" failure tells us exactly which selector needs updating.
+  function diagnoseSelectors() {
+    const candidates = [
+      '[data-message-author-role]',
+      'article[data-testid^="conversation-turn"]',
+      '[data-testid^="conversation-turn"]',
+      'main article',
+      'button[data-testid="copy-turn-action-button"]',
+      'button[aria-label="Copy"]'
+    ];
+    console.group('🔎 ChatGPT exporter selector diagnostics');
+    candidates.forEach(sel => {
+      let n = 0;
+      try { n = document.querySelectorAll(sel).length; } catch (e) { n = -1; }
+      console.log(`${String(n).padStart(4)}  ${sel}`);
+    });
+    console.groupEnd();
+  }
+
+  function getMessages() {
+    return Array.from(document.querySelectorAll(SELECTORS.message));
+  }
+
+  function getRole(msgEl) {
+    return msgEl.getAttribute('data-message-author-role') || null;
+  }
+
+  // A stable identifier so we never capture a turn twice and never lose
+  // ordering as ChatGPT adds/removes turns from the DOM while we scroll.
+  // Prefer the message UUID; fall back to role + a slice of its text.
+  function getTurnKey(msgEl, role) {
+    const id = msgEl.getAttribute('data-message-id');
+    if (id) return id;
+    const text = msgEl.textContent?.trim().slice(0, 120) || '';
+    return `${role}:${text}`;
+  }
+
+  // Find a turn's copy button by walking up from the message element and
+  // returning the nearest ancestor whose subtree contains one. Walking from
+  // the message outward means we hit that message's own action bar first.
+  function findCopyButton(msgEl) {
+    let el = msgEl;
+    for (let i = 0; i < 6 && el; i++) {
+      const btn = el.querySelector?.(SELECTORS.copyButton);
+      if (btn) return btn;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  // Find the scrollable conversation container so we can drive it top to
+  // bottom. ChatGPT virtualizes long chats, removing off-screen turns.
   function getScrollContainer() {
-    const anyTurn = document.querySelector(SELECTORS.conversationTurn);
-    let el = anyTurn?.parentElement;
+    let el = getMessages()[0]?.parentElement;
     while (el && el !== document.body) {
       const style = getComputedStyle(el);
       const scrolls = /(auto|scroll)/.test(style.overflowY);
       if (scrolls && el.scrollHeight > el.clientHeight + 50) return el;
       el = el.parentElement;
     }
-    // Fall back to the document scroller.
     return document.scrollingElement || document.documentElement;
   }
 
-  function countTurns() {
-    return document.querySelectorAll(SELECTORS.conversationTurn).length;
+  // Capture one message's content. Assistant turns are copied via the button
+  // for markdown fidelity; if no button is available we fall back to reading
+  // the rendered text directly (degraded, but better than losing the turn).
+  async function captureTurn(msgEl, role) {
+    const copyBtn = findCopyButton(msgEl);
+
+    if (copyBtn) {
+      if (copyBtn.scrollIntoView) {
+        copyBtn.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+      }
+      const pending = captureNextClipboard(DELAYS.clipboardWait);
+      copyBtn.click();
+      const text = await pending;
+      if (text) return text;
+    }
+
+    // Fallbacks: read rendered text straight from the DOM.
+    const fallbackEl = role === 'user'
+      ? (msgEl.querySelector(SELECTORS.userMessageText) || msgEl)
+      : (msgEl.querySelector(SELECTORS.assistantMarkdown) || msgEl);
+    const text = fallbackEl?.innerText?.trim();
+    return text || null;
   }
 
-  function getRole(turn) {
-    const roleEl = turn.querySelector(SELECTORS.authorRole);
-    return roleEl?.getAttribute('data-message-author-role') || null;
-  }
-
-  // A stable identifier for a turn so we never capture it twice and never
-  // lose ordering, even as ChatGPT adds/removes turns from the DOM while we
-  // scroll. Prefer the message UUID; fall back to the turn's testid.
-  function getTurnKey(turn) {
-    const roleEl = turn.querySelector(SELECTORS.authorRole);
-    return roleEl?.getAttribute('data-message-id') ||
-           turn.getAttribute('data-testid') ||
-           null;
+  function buildMarkdown() {
+    let markdown = "# Conversation with ChatGPT\n\n";
+    for (const msg of messages) {
+      if (!msg.content) continue;
+      const header = msg.role === 'user' ? '## You:' : '## ChatGPT:';
+      markdown += `${header}\n\n${msg.content}\n\n---\n\n`;
+    }
+    return markdown;
   }
 
   // Scroll the conversation top to bottom, capturing turns as they render.
-  // ChatGPT virtualizes long chats — turns above AND below the viewport get
-  // removed from the DOM — so a "load everything then capture" pass would
-  // lose early messages. Instead we capture each turn the moment it is in the
-  // DOM, deduping by getTurnKey, so the transcript stays complete and ordered.
+  // Turns above AND below the viewport get removed from the DOM, so we capture
+  // each turn the moment it is present, deduping by getTurnKey to stay
+  // complete and ordered.
   async function scrollAndCapture() {
     const container = getScrollContainer();
     const seen = new Set();
 
-    // Start from the top so we capture in conversation order.
     container.scrollTo({ top: 0, behavior: 'instant' });
     await delay(DELAYS.scrollSettle);
 
     let stableRounds = 0;
 
     for (let step = 0; step < SCROLL.maxSteps; step++) {
-      // Capture any not-yet-seen turns currently in the DOM, in order.
-      const turns = Array.from(document.querySelectorAll(SELECTORS.conversationTurn));
       let capturedThisRound = 0;
 
-      for (const turn of turns) {
-        const key = getTurnKey(turn);
-        if (!key || seen.has(key)) continue;
+      for (const msgEl of getMessages()) {
+        const role = getRole(msgEl);
+        if (role !== 'user' && role !== 'assistant') continue;
 
-        const role = getRole(turn);
-        if (role !== 'user' && role !== 'assistant') { seen.add(key); continue; }
-
-        const content = await captureTurn(turn, role);
+        const key = getTurnKey(msgEl, role);
+        if (seen.has(key)) continue;
         seen.add(key);
+
+        const content = await captureTurn(msgEl, role);
         capturedThisRound++;
 
         if (content) {
@@ -194,7 +252,6 @@ function setupChatGPTExporter() {
         await delay(DELAYS.copy);
       }
 
-      // Advance the scroll position to render the next region.
       const before = container.scrollTop;
       container.scrollBy({ top: Math.max(container.clientHeight * 0.8, 400), behavior: 'instant' });
       await delay(DELAYS.scrollSettle);
@@ -204,7 +261,6 @@ function setupChatGPTExporter() {
 
       statusDiv.textContent = `Scanning... (${messages.length} captured)`;
 
-      // Stop once we're at the bottom and no new turns are appearing.
       if (atBottom && capturedThisRound === 0) {
         stableRounds++;
         if (stableRounds >= SCROLL.stableRounds) break;
@@ -216,49 +272,14 @@ function setupChatGPTExporter() {
     console.log(`📜 Finished scanning: ${messages.length} messages captured`);
   }
 
-  // Capture one turn's content. Assistant turns are copied via the button for
-  // perfect markdown fidelity; user turns use the button when present and
-  // otherwise fall back to reading their plain-text content directly.
-  async function captureTurn(turn, role) {
-    const copyBtn = turn.querySelector(SELECTORS.copyButton);
-
-    if (copyBtn) {
-      if (copyBtn.scrollIntoView) {
-        copyBtn.scrollIntoView({ behavior: 'instant', block: 'nearest' });
-      }
-      const pending = captureNextClipboard(DELAYS.clipboardWait);
-      copyBtn.click();
-      const text = await pending;
-      if (text) return text;
-    }
-
-    // Fallback: read user message text straight from the DOM.
-    if (role === 'user') {
-      const textEl = turn.querySelector(SELECTORS.userMessageText) ||
-                     turn.querySelector(SELECTORS.authorRole);
-      const text = textEl?.innerText?.trim();
-      if (text) return text;
-    }
-
-    return null;
-  }
-
-  function buildMarkdown() {
-    let markdown = "# Conversation with ChatGPT\n\n";
-
-    for (const msg of messages) {
-      if (!msg.content) continue;
-      const header = msg.role === 'user' ? '## You:' : '## ChatGPT:';
-      markdown += `${header}\n\n${msg.content}\n\n---\n\n`;
-    }
-
-    return markdown;
-  }
-
   async function startExport() {
     try {
-      if (document.querySelectorAll(SELECTORS.conversationTurn).length === 0) {
-        throw new Error('No conversation turns found! Make sure the chat is open and loaded.');
+      if (getMessages().length === 0) {
+        diagnoseSelectors();
+        throw new Error(
+          'No messages found via [data-message-author-role]. ChatGPT may have ' +
+          'changed its DOM — see the selector diagnostics logged above.'
+        );
       }
 
       // Auto-scroll through the whole conversation, capturing turns as they
