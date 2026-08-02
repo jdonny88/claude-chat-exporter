@@ -11,8 +11,10 @@ function setupChatGPTExporter() {
   // every message container and has kept stable across many UI revisions.
   const SELECTORS = {
     message: '[data-message-author-role]',
-    // Ancestors searched (nearest first) to find a turn's copy button.
-    copyButton: 'button[data-testid="copy-turn-action-button"], button[aria-label="Copy"]',
+    // The turn's action-bar copy button (copies the whole message).
+    copyButton: 'button[data-testid="copy-turn-action-button"]',
+    // Looser fallback; must be filtered to exclude code-block "Copy" buttons.
+    copyButtonFallback: 'button[aria-label="Copy"]',
     // Fallbacks for reading content directly from the DOM.
     assistantMarkdown: '.markdown, .prose',
     userMessageText: '.whitespace-pre-wrap'
@@ -199,17 +201,20 @@ function setupChatGPTExporter() {
     return last ? getTurnKey(last, getRole(last)) : null;
   }
 
-  // Find a turn's copy button by walking up from the message element and
-  // returning the nearest ancestor whose subtree contains one. Walking from
-  // the message outward means we hit that message's own action bar first.
-  function findCopyButton(msgEl) {
+  // The message's OWN turn: the largest ancestor that still contains exactly
+  // one message. Scoping copy-button and text lookups to this prevents picking
+  // up a sibling (earlier) message's button/content, which scrambled ordering
+  // and truncated responses.
+  function getTurnContainer(msgEl) {
+    const article = msgEl.closest('article');
+    if (article && article.querySelectorAll(SELECTORS.message).length === 1) return article;
     let el = msgEl;
-    for (let i = 0; i < 6 && el; i++) {
-      const btn = el.querySelector?.(SELECTORS.copyButton);
-      if (btn) return btn;
+    while (el.parentElement &&
+           el.parentElement !== document.body &&
+           el.parentElement.querySelectorAll(SELECTORS.message).length === 1) {
       el = el.parentElement;
     }
-    return null;
+    return el;
   }
 
   // Find the scrollable conversation container so we can drive it top to
@@ -242,8 +247,7 @@ function setupChatGPTExporter() {
   // ChatGPT collapses very long messages behind a "Show more" toggle and may
   // keep the hidden portion out of the DOM until expanded. Click any such
   // toggle within the turn so the full content is present before we capture.
-  function expandCollapsed(msgEl) {
-    const scope = msgEl.closest('article') || msgEl.parentElement || msgEl;
+  function expandCollapsed(scope) {
     let expanded = false;
     for (const btn of scope.querySelectorAll('button')) {
       const label = (btn.textContent || '').trim().toLowerCase();
@@ -254,15 +258,31 @@ function setupChatGPTExporter() {
     return expanded;
   }
 
+  // Choose the turn's own copy button. Prefer the action-bar button by its
+  // stable testid; only fall back to an aria-label="Copy" button that is NOT
+  // inside a code block (those "Copy code" buttons copy just one snippet and
+  // would truncate the message).
+  function pickCopyButton(turn) {
+    const primary = turn.querySelector(SELECTORS.copyButton);
+    if (primary) return primary;
+    for (const btn of turn.querySelectorAll(SELECTORS.copyButtonFallback)) {
+      if (!btn.closest('pre') && !btn.closest('code')) return btn;
+    }
+    return null;
+  }
+
   // Capture one message's content. Assistant turns are copied via the button
   // for markdown fidelity; if no button is available we fall back to reading
   // the rendered text directly (degraded, but better than losing the turn).
+  // All lookups are scoped to the message's own turn container.
   async function captureTurn(msgEl, role) {
-    if (expandCollapsed(msgEl)) {
+    const turn = getTurnContainer(msgEl);
+
+    if (expandCollapsed(turn)) {
       await delay(DELAYS.copy); // let the expanded content render
     }
 
-    const copyBtn = findCopyButton(msgEl);
+    const copyBtn = pickCopyButton(turn);
 
     if (copyBtn) {
       // Note: no scrollIntoView here — clicking works even when the button is
@@ -273,7 +293,7 @@ function setupChatGPTExporter() {
       if (text) return text;
     }
 
-    // Fallbacks: read rendered text straight from the DOM.
+    // Fallbacks: read rendered text straight from the message element.
     const fallbackEl = role === 'user'
       ? (msgEl.querySelector(SELECTORS.userMessageText) || msgEl)
       : (msgEl.querySelector(SELECTORS.assistantMarkdown) || msgEl);
