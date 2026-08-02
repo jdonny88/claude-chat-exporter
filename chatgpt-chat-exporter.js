@@ -357,24 +357,29 @@ function setupChatGPTExporter() {
       }
       await delay(DELAYS.scrollSettle);
 
-      // Progress = anything moved or loaded. Works for both real-scroll and
-      // fallback modes (fallback shows up as a changed last-message key or DOM
-      // count even when our container's scrollTop stays put).
-      const progressed =
+      // CONTENT progress only — deliberately excludes scrollTop movement, since
+      // a scrollIntoView fallback at the bottom wiggles scrollTop back and
+      // forth without loading anything new. New captures or newly rendered
+      // turns (changed height / DOM count / last-message key) are real progress.
+      const contentProgressed =
         seen.size > sizeBefore ||
-        container.scrollTop > topBefore + 1 ||
         container.scrollHeight !== heightBefore ||
         getMessages().length !== domBefore ||
         lastMessageKey() !== lastBefore;
 
+      // Only consider stopping once we're near the bottom, so a slow-loading
+      // round mid-descent can't end the run early.
+      const nearBottom = container.scrollTop >= maxScrollNow() - Math.max(container.clientHeight, 300);
+
       if (step % 5 === 0) {
-        console.log(`📜 step ${step}: scrollTop=${Math.round(container.scrollTop)}/${Math.round(maxScrollNow())}, DOM=${getMessages().length}, captured=${messages.length}, fallback=${usedFallback}, progressed=${progressed}`);
+        console.log(`📜 step ${step}: scrollTop=${Math.round(container.scrollTop)}/${Math.round(maxScrollNow())}, DOM=${getMessages().length}, captured=${messages.length}, fallback=${usedFallback}, nearBottom=${nearBottom}, contentProgressed=${contentProgressed}`);
       }
 
       statusDiv.textContent = `Scanning... (${messages.length} captured)`;
 
-      // Stop once no round makes any progress for several consecutive rounds.
-      if (!progressed) {
+      // Stop once we're near the bottom and no new content appears for a few
+      // consecutive rounds.
+      if (nearBottom && !contentProgressed) {
         stableRounds++;
         if (stableRounds >= SCROLL.stableRounds) break;
       } else {
