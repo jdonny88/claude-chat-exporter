@@ -1,5 +1,7 @@
 function setupChatGPTExporter() {
-  const originalWriteText = navigator.clipboard.writeText;
+  const clipboard = navigator.clipboard;
+  const originalWriteText = clipboard.writeText.bind(clipboard);
+  const originalWrite = clipboard.write ? clipboard.write.bind(clipboard) : null;
   const messages = [];
   let interceptorActive = true;
   let clipboardResolver = null;
@@ -71,16 +73,51 @@ function setupChatGPTExporter() {
     return 'chatgpt_conversation';
   }
 
-  // Intercept clipboard writes so a copy button click can be captured, then
-  // still forward to the real clipboard (fully restored on cleanup).
-  navigator.clipboard.writeText = function(text) {
+  function deliverCapture(text) {
     if (interceptorActive && text && clipboardResolver) {
       const resolve = clipboardResolver;
       clipboardResolver = null;
       resolve(text);
+      return true;
     }
-    return originalWriteText.apply(this, arguments);
+    return false;
+  }
+
+  // Pull the text/plain payload out of a clipboard.write() ClipboardItem list.
+  async function extractText(items) {
+    try {
+      for (const item of items || []) {
+        if (item.types?.includes('text/plain')) {
+          const blob = await item.getType('text/plain');
+          return await blob.text();
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  // Intercept clipboard writes to capture copy-button output. While exporting
+  // we do NOT forward to the real clipboard: the browser blocks it when the
+  // page isn't focused (DevTools has focus), which spams NotAllowedError, and
+  // forwarding would also clobber the user's actual clipboard. Both originals
+  // are restored on cleanup.
+  clipboard.writeText = function(text) {
+    if (interceptorActive) {
+      deliverCapture(text);
+      return Promise.resolve();
+    }
+    return originalWriteText(text);
   };
+
+  if (originalWrite) {
+    clipboard.write = function(items) {
+      if (interceptorActive) {
+        extractText(items).then(deliverCapture);
+        return Promise.resolve();
+      }
+      return originalWrite(items);
+    };
+  }
 
   // Resolve with the next intercepted clipboard write, or null on timeout.
   function captureNextClipboard(timeoutMs) {
@@ -317,7 +354,8 @@ function setupChatGPTExporter() {
   }
 
   function cleanup() {
-    navigator.clipboard.writeText = originalWriteText;
+    clipboard.writeText = originalWriteText;
+    if (originalWrite) clipboard.write = originalWrite;
     if (document.body.contains(statusDiv)) {
       document.body.removeChild(statusDiv);
     }

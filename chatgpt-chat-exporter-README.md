@@ -140,6 +140,10 @@ The `message` selector is the backbone: ChatGPT tags every message container wit
 - On slow connections, increase `DELAYS.scrollSettle` so turns have time to render
 - If a mismatch persists, refresh the page and try again
 
+**`NotAllowedError: ... Document is not focused` in the console**
+
+- Harmless and handled: while exporting, the script captures copy-button output without forwarding it to the real clipboard (so it never touches your actual clipboard and doesn't need page focus). If you still see these, you're likely on an older copy of the script — re-grab the latest.
+
 ## Comparison with the Claude Exporter
 
 | Aspect | Claude Exporter | ChatGPT Exporter |
