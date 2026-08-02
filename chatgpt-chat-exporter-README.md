@@ -6,7 +6,8 @@ A JavaScript tool that exports ChatGPT conversations to **clean Markdown** by le
 
 - **🎯 High Markdown Fidelity** - Uses ChatGPT's copy button for exact output on assistant messages (tables, code, math, etc.)
 - **🗣️ Correct Speaker Labels** - Reads each turn's `data-message-author-role` attribute, so no guessing who said what
-- **⏩ True Conversation Order** - Captures turns in DOM order, preserving interleaving exactly
+- **📜 Auto-Scroll (handles virtualization)** - Scrolls the whole conversation for you, capturing turns as they render, so off-screen messages in long chats aren't missed
+- **⏩ True Conversation Order** - Captures turns in order and dedupes by `data-message-id`, preserving interleaving exactly
 - **📁 Smart Filename Generation** - Uses the conversation title from the sidebar/document title
 - **📈 Real-Time Status** - Visual progress indicator during export
 - **🛡️ Graceful Fallback** - Falls back to reading a user message's text directly if no copy button is present
@@ -14,10 +15,11 @@ A JavaScript tool that exports ChatGPT conversations to **clean Markdown** by le
 
 ## How It Works
 
-1. **Find Turns** - Selects every conversation turn (`[data-testid^="conversation-turn"]`) in DOM order
-2. **Identify Speaker** - Reads each turn's `data-message-author-role` (`user` or `assistant`)
-3. **Capture Content** - Clicks the turn's copy button and captures the write via an intercepted `navigator.clipboard.writeText`; for user turns without a copy button, reads the plain text directly
-4. **Perfect Output** - Combines all captured turns into a single Markdown file with `## You:` / `## ChatGPT:` headers
+1. **Auto-Scroll** - Scrolls the conversation from top to bottom, letting ChatGPT render turns that were virtualized (removed from the DOM while off-screen)
+2. **Find Turns** - Selects every conversation turn (`[data-testid^="conversation-turn"]`) as it renders
+3. **Identify Speaker** - Reads each turn's `data-message-author-role` (`user` or `assistant`)
+4. **Capture Content** - Clicks the turn's copy button and captures the write via an intercepted `navigator.clipboard.writeText`; for user turns without a copy button, reads the plain text directly. Each turn is deduped by its `data-message-id` so nothing is captured twice or lost as the DOM changes
+5. **Perfect Output** - Combines all captured turns into a single Markdown file with `## You:` / `## ChatGPT:` headers
 
 ### Why the Copy Button Approach?
 
@@ -40,14 +42,15 @@ Instead of manually parsing HTML into Markdown (which mangles tables, code fence
 ## Usage
 
 1. Open your conversation on [chatgpt.com](https://chatgpt.com) in your web browser.
-2. Scroll through the **entire** conversation once so every message is loaded into the DOM (ChatGPT virtualizes long chats).
-3. Open the browser's developer console:
+2. Open the browser's developer console:
    - Chrome/Edge: Press F12 or Ctrl+Shift+J (Windows/Linux) or Cmd+Option+J (Mac)
    - Firefox: Press F12 or Ctrl+Shift+K (Windows/Linux) or Cmd+Option+K (Mac)
    - Safari: Enable the Develop menu in preferences, then press Cmd+Option+C
-4. Copy the entire script in `chatgpt-chat-exporter.js` and paste it into the console.
-5. Press Enter to run the script.
-6. A progress indicator appears and a file named `{conversation-title}.md` is downloaded automatically.
+3. Copy the entire script in `chatgpt-chat-exporter.js` and paste it into the console.
+4. Press Enter to run the script.
+5. The script **auto-scrolls** through the whole conversation (you'll see the page scroll and the counter climb), then downloads a file named `{conversation-title}.md` automatically.
+
+> **Tip:** You no longer need to scroll manually first — the script does it for you. Just leave the tab focused and let it run; very long chats take a bit longer while it walks through every turn.
 
 ## File Output
 
@@ -88,10 +91,18 @@ Adjust the delays in the `DELAYS` object:
 
 ```javascript
 const DELAYS = {
-  copy: 100,          // Pause between turns in ms (increase if messages are missed)
-  clipboardWait: 2000 // Max wait for a single copy button's write in ms
+  copy: 100,           // Pause between turns in ms (increase if messages are missed)
+  clipboardWait: 2000, // Max wait for a single copy button's write in ms
+  scrollSettle: 400    // Pause after each scroll step so new turns can render
+};
+
+const SCROLL = {
+  maxSteps: 400,   // Hard cap on scroll iterations (safety valve)
+  stableRounds: 3  // Stop once no new turns appear this many rounds at the bottom
 };
 ```
+
+On slow connections, increase `scrollSettle` so virtualized turns have time to render before the next scroll step. For very long chats, raise `maxSteps` if the export stops before reaching the bottom.
 
 ### UI Selector Updates
 
@@ -112,7 +123,7 @@ The `authorRole` selector is what distinguishes user from assistant turns — Ch
 
 ### Export Status Indicators
 
-- `Exporting messages...` - Walking through turns
+- `Loading messages...` / `Scanning... (N captured)` - Auto-scrolling and capturing turns
 - `You: X | ChatGPT: Y` - Live capture counts
 - `✅ Downloaded: filename.md` - Success!
 
@@ -120,13 +131,13 @@ The `authorRole` selector is what distinguishes user from assistant turns — Ch
 
 **No Messages Captured**
 
-- Ensure the conversation is fully loaded and scrolled through top to bottom
-- Check that messages are visible on screen
-- ChatGPT virtualizes long chats — off-screen turns may be removed from the DOM
+- Ensure the conversation is open and at least the first messages are visible
+- Keep the tab focused while the script runs (background tabs may throttle scrolling)
 
 **Partial Export**
 
-- Long conversations may drop off-screen turns; scroll through the whole chat first, then run the script
+- If the export stops before the bottom on a very long chat, increase `SCROLL.maxSteps`
+- On slow connections, increase `DELAYS.scrollSettle` so turns have time to render
 - If a mismatch persists, refresh the page and try again
 
 ## Comparison with the Claude Exporter
@@ -134,7 +145,8 @@ The `authorRole` selector is what distinguishes user from assistant turns — Ch
 | Aspect | Claude Exporter | ChatGPT Exporter |
 | --- | --- | --- |
 | Speaker detection | Presence of a feedback button | `data-message-author-role` attribute |
-| Capture order | Two phases (all human, then all Claude) | Single pass in true DOM order |
+| Capture order | Two phases (all human, then all Claude) | Single pass in true DOM order, deduped by `data-message-id` |
+| Virtualization | Manual "scroll first" advice | Automatic top-to-bottom auto-scroll |
 | Timestamps | Fetched from Claude's API | Not included (auth-free, DOM-only) |
 | Content source | Copy button + clipboard intercept | Copy button + clipboard intercept (user fallback to text) |
 
@@ -149,7 +161,6 @@ The `authorRole` selector is what distinguishes user from assistant turns — Ch
 - **Requires JavaScript** - Must be enabled in browser
 - **ChatGPT Web Only** - Works only on the chatgpt.com web interface
 - **Susceptible to DOM changes** - Interface changes may require selector updates
-- **Visible Messages Only** - Only exports turns currently in the DOM (scroll through long chats first)
 - **No Timestamps** - This auth-free version does not fetch message times
 - **No Attachments / Artifacts** - Uploaded files, images, and canvas content are skipped
 

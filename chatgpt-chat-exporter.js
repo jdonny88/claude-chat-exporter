@@ -17,8 +17,14 @@ function setupChatGPTExporter() {
   };
 
   const DELAYS = {
-    copy: 100,          // Pause between turns so the clipboard write can land
-    clipboardWait: 2000 // Max time to wait for a single copy button's write
+    copy: 100,           // Pause between turns so the clipboard write can land
+    clipboardWait: 2000, // Max time to wait for a single copy button's write
+    scrollSettle: 400    // Pause after each scroll step so new turns can render
+  };
+
+  const SCROLL = {
+    maxSteps: 400,       // Hard cap on scroll iterations (safety valve)
+    stableRounds: 3      // Stop once the turn count holds steady this many rounds
   };
 
   function downloadMarkdown(content, filename) {
@@ -111,9 +117,103 @@ function setupChatGPTExporter() {
     statusDiv.textContent = `You: ${you} | ChatGPT: ${gpt}`;
   }
 
+  // Find the scrollable conversation container. ChatGPT virtualizes long
+  // chats, removing off-screen turns from the DOM, so we scroll it top to
+  // bottom first to force every turn to render before capturing.
+  function getScrollContainer() {
+    const anyTurn = document.querySelector(SELECTORS.conversationTurn);
+    let el = anyTurn?.parentElement;
+    while (el && el !== document.body) {
+      const style = getComputedStyle(el);
+      const scrolls = /(auto|scroll)/.test(style.overflowY);
+      if (scrolls && el.scrollHeight > el.clientHeight + 50) return el;
+      el = el.parentElement;
+    }
+    // Fall back to the document scroller.
+    return document.scrollingElement || document.documentElement;
+  }
+
+  function countTurns() {
+    return document.querySelectorAll(SELECTORS.conversationTurn).length;
+  }
+
   function getRole(turn) {
     const roleEl = turn.querySelector(SELECTORS.authorRole);
     return roleEl?.getAttribute('data-message-author-role') || null;
+  }
+
+  // A stable identifier for a turn so we never capture it twice and never
+  // lose ordering, even as ChatGPT adds/removes turns from the DOM while we
+  // scroll. Prefer the message UUID; fall back to the turn's testid.
+  function getTurnKey(turn) {
+    const roleEl = turn.querySelector(SELECTORS.authorRole);
+    return roleEl?.getAttribute('data-message-id') ||
+           turn.getAttribute('data-testid') ||
+           null;
+  }
+
+  // Scroll the conversation top to bottom, capturing turns as they render.
+  // ChatGPT virtualizes long chats — turns above AND below the viewport get
+  // removed from the DOM — so a "load everything then capture" pass would
+  // lose early messages. Instead we capture each turn the moment it is in the
+  // DOM, deduping by getTurnKey, so the transcript stays complete and ordered.
+  async function scrollAndCapture() {
+    const container = getScrollContainer();
+    const seen = new Set();
+
+    // Start from the top so we capture in conversation order.
+    container.scrollTo({ top: 0, behavior: 'instant' });
+    await delay(DELAYS.scrollSettle);
+
+    let stableRounds = 0;
+
+    for (let step = 0; step < SCROLL.maxSteps; step++) {
+      // Capture any not-yet-seen turns currently in the DOM, in order.
+      const turns = Array.from(document.querySelectorAll(SELECTORS.conversationTurn));
+      let capturedThisRound = 0;
+
+      for (const turn of turns) {
+        const key = getTurnKey(turn);
+        if (!key || seen.has(key)) continue;
+
+        const role = getRole(turn);
+        if (role !== 'user' && role !== 'assistant') { seen.add(key); continue; }
+
+        const content = await captureTurn(turn, role);
+        seen.add(key);
+        capturedThisRound++;
+
+        if (content) {
+          messages.push({ role, content });
+          console.log(`📋 Captured ${role} message ${messages.length}`);
+          updateStatus();
+        } else {
+          console.warn(`⚠️ Could not capture ${role} turn (key ${key})`);
+        }
+
+        await delay(DELAYS.copy);
+      }
+
+      // Advance the scroll position to render the next region.
+      const before = container.scrollTop;
+      container.scrollBy({ top: Math.max(container.clientHeight * 0.8, 400), behavior: 'instant' });
+      await delay(DELAYS.scrollSettle);
+
+      const atBottom = container.scrollTop <= before + 1 ||
+        container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+
+      statusDiv.textContent = `Scanning... (${messages.length} captured)`;
+
+      // Stop once we're at the bottom and no new turns are appearing.
+      if (atBottom && capturedThisRound === 0) {
+        stableRounds++;
+        if (stableRounds >= SCROLL.stableRounds) break;
+      } else {
+        stableRounds = 0;
+      }
+    }
+
+    console.log(`📜 Finished scanning: ${messages.length} messages captured`);
   }
 
   // Capture one turn's content. Assistant turns are copied via the button for
@@ -157,33 +257,13 @@ function setupChatGPTExporter() {
 
   async function startExport() {
     try {
-      const turns = Array.from(document.querySelectorAll(SELECTORS.conversationTurn));
-
-      if (turns.length === 0) {
-        throw new Error('No conversation turns found! Make sure the chat is fully loaded.');
+      if (document.querySelectorAll(SELECTORS.conversationTurn).length === 0) {
+        throw new Error('No conversation turns found! Make sure the chat is open and loaded.');
       }
 
-      statusDiv.textContent = 'Exporting messages...';
-
-      // Walk turns in DOM order so the transcript preserves interleaving.
-      for (let i = 0; i < turns.length; i++) {
-        const turn = turns[i];
-        const role = getRole(turn);
-        if (role !== 'user' && role !== 'assistant') continue;
-
-        const content = await captureTurn(turn, role);
-        if (content) {
-          messages.push({ role, content });
-          console.log(`📋 Captured ${role} message ${messages.length}`);
-          updateStatus();
-        } else {
-          console.warn(`⚠️ Could not capture ${role} turn (${i + 1}/${turns.length})`);
-        }
-
-        if (i < turns.length - 1) {
-          await delay(DELAYS.copy);
-        }
-      }
+      // Auto-scroll through the whole conversation, capturing turns as they
+      // render so virtualized (off-screen) messages are not missed.
+      await scrollAndCapture();
 
       completeExport();
 
