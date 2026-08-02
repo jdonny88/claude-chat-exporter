@@ -206,15 +206,26 @@ function setupChatGPTExporter() {
 
   // Find the scrollable conversation container so we can drive it top to
   // bottom. ChatGPT virtualizes long chats, removing off-screen turns.
+  // Detection is BEHAVIORAL rather than CSS-based: among the message's
+  // scrollable-looking ancestors, pick the first whose scrollTop actually
+  // moves when we nudge it. This is robust to class/style changes.
   function getScrollContainer() {
     let el = getMessages()[0]?.parentElement;
-    while (el && el !== document.body) {
-      const style = getComputedStyle(el);
-      const scrolls = /(auto|scroll)/.test(style.overflowY);
-      if (scrolls && el.scrollHeight > el.clientHeight + 50) return el;
+    const candidates = [];
+    while (el && el !== document.body && el !== document.documentElement) {
+      if (el.scrollHeight > el.clientHeight + 20) candidates.push(el);
       el = el.parentElement;
     }
-    return document.scrollingElement || document.documentElement;
+    candidates.push(document.scrollingElement || document.documentElement);
+
+    for (const c of candidates) {
+      const orig = c.scrollTop;
+      c.scrollTop = orig + 20;
+      const moved = c.scrollTop !== orig;
+      c.scrollTop = orig;
+      if (moved) return c;
+    }
+    return candidates[candidates.length - 1];
   }
 
   // Capture one message's content. Assistant turns are copied via the button
@@ -255,50 +266,65 @@ function setupChatGPTExporter() {
   // Turns above AND below the viewport get removed from the DOM, so we capture
   // each turn the moment it is present, deduping by getTurnKey to stay
   // complete and ordered.
+  // Capture every not-yet-seen message currently in the DOM, in order.
+  async function captureVisible(seen) {
+    for (const msgEl of getMessages()) {
+      const role = getRole(msgEl);
+      if (role !== 'user' && role !== 'assistant') continue;
+
+      const key = getTurnKey(msgEl, role);
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const content = await captureTurn(msgEl, role);
+
+      if (content) {
+        messages.push({ role, content });
+        console.log(`📋 Captured ${role} message ${messages.length}`);
+        updateStatus();
+      } else {
+        console.warn(`⚠️ Could not capture ${role} turn (key ${key})`);
+      }
+
+      await delay(DELAYS.copy);
+    }
+  }
+
   async function scrollAndCapture() {
     const container = getScrollContainer();
     const seen = new Set();
+    console.log('📜 Scroll container:', container.tagName, container.className || '(no class)');
 
-    container.scrollTo({ top: 0, behavior: 'instant' });
+    container.scrollTop = 0;
     await delay(DELAYS.scrollSettle);
 
     let stableRounds = 0;
 
     for (let step = 0; step < SCROLL.maxSteps; step++) {
-      let capturedThisRound = 0;
+      const sizeBefore = seen.size;
+      await captureVisible(seen);
 
-      for (const msgEl of getMessages()) {
-        const role = getRole(msgEl);
-        if (role !== 'user' && role !== 'assistant') continue;
-
-        const key = getTurnKey(msgEl, role);
-        if (seen.has(key)) continue;
-        seen.add(key);
-
-        const content = await captureTurn(msgEl, role);
-        capturedThisRound++;
-
-        if (content) {
-          messages.push({ role, content });
-          console.log(`📋 Captured ${role} message ${messages.length}`);
-          updateStatus();
-        } else {
-          console.warn(`⚠️ Could not capture ${role} turn (key ${key})`);
-        }
-
-        await delay(DELAYS.copy);
+      // Advance downward. Direct scrollTop assignment is more reliable than
+      // scrollBy; if the container refuses to move, nudge via the last
+      // rendered message so we don't depend on perfect container detection.
+      const topBefore = container.scrollTop;
+      const heightBefore = container.scrollHeight;
+      container.scrollTop = topBefore + Math.max(container.clientHeight * 0.85, 400);
+      if (container.scrollTop <= topBefore + 1) {
+        getMessages().at(-1)?.scrollIntoView({ behavior: 'instant', block: 'end' });
       }
-
-      const before = container.scrollTop;
-      container.scrollBy({ top: Math.max(container.clientHeight * 0.8, 400), behavior: 'instant' });
       await delay(DELAYS.scrollSettle);
-
-      const atBottom = container.scrollTop <= before + 1 ||
-        container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
 
       statusDiv.textContent = `Scanning... (${messages.length} captured)`;
 
-      if (atBottom && capturedThisRound === 0) {
+      // Progress = we captured something new, the container scrolled, or more
+      // content loaded (scrollHeight grew). Only stop when none of these hold
+      // for several consecutive rounds — independent of a bottom estimate.
+      const grew = seen.size > sizeBefore;
+      const scrolled = container.scrollTop > topBefore + 1;
+      const heightGrew = container.scrollHeight > heightBefore + 1;
+
+      if (!grew && !scrolled && !heightGrew) {
         stableRounds++;
         if (stableRounds >= SCROLL.stableRounds) break;
       } else {
@@ -306,6 +332,8 @@ function setupChatGPTExporter() {
       }
     }
 
+    // Final sweep in case the last turns rendered after the loop's last capture.
+    await captureVisible(seen);
     console.log(`📜 Finished scanning: ${messages.length} messages captured`);
   }
 
