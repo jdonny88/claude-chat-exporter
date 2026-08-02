@@ -228,10 +228,29 @@ function setupChatGPTExporter() {
     return candidates[candidates.length - 1];
   }
 
+  // ChatGPT collapses very long messages behind a "Show more" toggle and may
+  // keep the hidden portion out of the DOM until expanded. Click any such
+  // toggle within the turn so the full content is present before we capture.
+  function expandCollapsed(msgEl) {
+    const scope = msgEl.closest('article') || msgEl.parentElement || msgEl;
+    let expanded = false;
+    for (const btn of scope.querySelectorAll('button')) {
+      const label = (btn.textContent || '').trim().toLowerCase();
+      if (label === 'show more' || label === 'read more' || label === 'see more') {
+        try { btn.click(); expanded = true; } catch (e) { /* ignore */ }
+      }
+    }
+    return expanded;
+  }
+
   // Capture one message's content. Assistant turns are copied via the button
   // for markdown fidelity; if no button is available we fall back to reading
   // the rendered text directly (degraded, but better than losing the turn).
   async function captureTurn(msgEl, role) {
+    if (expandCollapsed(msgEl)) {
+      await delay(DELAYS.copy); // let the expanded content render
+    }
+
     const copyBtn = findCopyButton(msgEl);
 
     if (copyBtn) {
@@ -294,6 +313,7 @@ function setupChatGPTExporter() {
     const container = getScrollContainer();
     const seen = new Set();
     console.log('📜 Scroll container:', container.tagName, container.className || '(no class)');
+    console.log(`📜 Messages in DOM at start: ${getMessages().length} (low number => ChatGPT is virtualizing)`);
 
     container.scrollTop = 0;
     await delay(DELAYS.scrollSettle);
