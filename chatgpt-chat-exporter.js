@@ -191,6 +191,14 @@ function setupChatGPTExporter() {
     return `${role}:${text}`;
   }
 
+  // Key of the last message currently in the DOM — used to detect when
+  // scrolling has loaded new turns even if our container's scrollTop didn't move.
+  function lastMessageKey() {
+    const msgs = getMessages();
+    const last = msgs[msgs.length - 1];
+    return last ? getTurnKey(last, getRole(last)) : null;
+  }
+
   // Find a turn's copy button by walking up from the message element and
   // returning the nearest ancestor whose subtree contains one. Walking from
   // the message outward means we hit that message's own action bar first.
@@ -210,22 +218,25 @@ function setupChatGPTExporter() {
   // scrollable-looking ancestors, pick the first whose scrollTop actually
   // moves when we nudge it. This is robust to class/style changes.
   function getScrollContainer() {
+    // Collect ancestors whose COMPUTED overflow allows scrolling — this is
+    // stable even when the element isn't currently taller than its viewport
+    // (few messages rendered), unlike a live scrollHeight check.
+    const overflowAncestors = [];
     let el = getMessages()[0]?.parentElement;
-    const candidates = [];
-    while (el && el !== document.body && el !== document.documentElement) {
-      if (el.scrollHeight > el.clientHeight + 20) candidates.push(el);
+    while (el && el !== document.body) {
+      let oy = '';
+      try { oy = getComputedStyle(el).overflowY; } catch (e) { /* ignore */ }
+      if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') overflowAncestors.push(el);
       el = el.parentElement;
     }
-    candidates.push(document.scrollingElement || document.documentElement);
 
-    for (const c of candidates) {
-      const orig = c.scrollTop;
-      c.scrollTop = orig + 20;
-      const moved = c.scrollTop !== orig;
-      c.scrollTop = orig;
-      if (moved) return c;
+    if (overflowAncestors.length) {
+      overflowAncestors.sort((a, b) => b.scrollHeight - a.scrollHeight);
+      console.log('📜 Overflow ancestors:',
+        overflowAncestors.map(e => `${e.tagName}.${String(e.className || '').slice(0, 40)} sh=${e.scrollHeight}`));
+      return overflowAncestors[0];
     }
-    return candidates[candidates.length - 1];
+    return document.scrollingElement || document.documentElement;
   }
 
   // ChatGPT collapses very long messages behind a "Show more" toggle and may
@@ -324,27 +335,46 @@ function setupChatGPTExporter() {
       const sizeBefore = seen.size;
       await captureVisible(seen);
 
-      // Advance STRICTLY downward, one chunk at a time, clamped to the bottom.
-      // No scrollIntoView anywhere — monotonic scrolling prevents the
-      // oscillation that stalled loading. Recompute the max each step since
-      // scrollHeight changes as turns render/unrender.
+      // Snapshot state so we can detect whether this round made ANY progress
+      // (new capture, container scroll, more/different content loaded).
       const topBefore = container.scrollTop;
+      const heightBefore = container.scrollHeight;
+      const domBefore = getMessages().length;
+      const lastBefore = lastMessageKey();
+
+      // Advance STRICTLY downward, one chunk at a time, clamped to the bottom.
       const target = Math.min(topBefore + Math.max(container.clientHeight * 0.6, 300), maxScrollNow());
       container.scrollTop = target;
+
+      // Fallback: if the container can't scroll (misdetected, or no spacer),
+      // drive loading by bringing the last rendered message to the bottom.
+      // scrollIntoView scrolls whatever the real scroll parent is. Monotonic
+      // because capture no longer scrolls and the last message only advances.
+      let usedFallback = false;
+      if (container.scrollTop <= topBefore + 1) {
+        getMessages().at(-1)?.scrollIntoView({ behavior: 'instant', block: 'end' });
+        usedFallback = true;
+      }
       await delay(DELAYS.scrollSettle);
 
-      const grew = seen.size > sizeBefore;
-      const atBottom = container.scrollTop >= maxScrollNow() - 4;
+      // Progress = anything moved or loaded. Works for both real-scroll and
+      // fallback modes (fallback shows up as a changed last-message key or DOM
+      // count even when our container's scrollTop stays put).
+      const progressed =
+        seen.size > sizeBefore ||
+        container.scrollTop > topBefore + 1 ||
+        container.scrollHeight !== heightBefore ||
+        getMessages().length !== domBefore ||
+        lastMessageKey() !== lastBefore;
 
-      if (step % 5 === 0 || atBottom) {
-        console.log(`📜 step ${step}: scrollTop=${Math.round(container.scrollTop)}/${Math.round(maxScrollNow())}, DOM=${getMessages().length}, captured=${messages.length}, atBottom=${atBottom}`);
+      if (step % 5 === 0) {
+        console.log(`📜 step ${step}: scrollTop=${Math.round(container.scrollTop)}/${Math.round(maxScrollNow())}, DOM=${getMessages().length}, captured=${messages.length}, fallback=${usedFallback}, progressed=${progressed}`);
       }
 
       statusDiv.textContent = `Scanning... (${messages.length} captured)`;
 
-      // Stop only once we're actually at the bottom and nothing new is being
-      // captured for a few consecutive rounds.
-      if (atBottom && !grew) {
+      // Stop once no round makes any progress for several consecutive rounds.
+      if (!progressed) {
         stableRounds++;
         if (stableRounds >= SCROLL.stableRounds) break;
       } else {
