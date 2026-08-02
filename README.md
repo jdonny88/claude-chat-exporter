@@ -263,6 +263,15 @@ This project benefits from:
 - **Temporary Interception** - Clipboard restored after export
 - **No Data Storage** - Messages processed and downloaded immediately
 
+## Sibling: ChatGPT Exporter
+
+Want to do the same thing for ChatGPT? This repo also ships a sibling script,
+[`chatgpt-chat-exporter.js`](./chatgpt-chat-exporter.js), that exports
+chatgpt.com conversations to Markdown using the same paste-in-console,
+copy-button approach. See
+[chatgpt-chat-exporter-README.md](./chatgpt-chat-exporter-README.md) for
+details.
+
 ## License
 
 This project is open source and available under the [MIT License](LICENSE).
