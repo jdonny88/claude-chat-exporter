@@ -254,9 +254,8 @@ function setupChatGPTExporter() {
     const copyBtn = findCopyButton(msgEl);
 
     if (copyBtn) {
-      if (copyBtn.scrollIntoView) {
-        copyBtn.scrollIntoView({ behavior: 'instant', block: 'nearest' });
-      }
+      // Note: no scrollIntoView here — clicking works even when the button is
+      // off-screen, and scrolling during capture fights the main scroll loop.
       const pending = captureNextClipboard(DELAYS.clipboardWait);
       copyBtn.click();
       const text = await pending;
@@ -312,8 +311,9 @@ function setupChatGPTExporter() {
   async function scrollAndCapture() {
     const container = getScrollContainer();
     const seen = new Set();
+    const maxScrollNow = () => Math.max(0, container.scrollHeight - container.clientHeight);
     console.log('📜 Scroll container:', container.tagName, container.className || '(no class)');
-    console.log(`📜 Messages in DOM at start: ${getMessages().length} (low number => ChatGPT is virtualizing)`);
+    console.log(`📜 Start: DOM messages=${getMessages().length}, scrollHeight=${container.scrollHeight}, clientHeight=${container.clientHeight}, maxScroll=${maxScrollNow()}`);
 
     container.scrollTop = 0;
     await delay(DELAYS.scrollSettle);
@@ -324,27 +324,27 @@ function setupChatGPTExporter() {
       const sizeBefore = seen.size;
       await captureVisible(seen);
 
-      // Advance downward. Direct scrollTop assignment is more reliable than
-      // scrollBy; if the container refuses to move, nudge via the last
-      // rendered message so we don't depend on perfect container detection.
+      // Advance STRICTLY downward, one chunk at a time, clamped to the bottom.
+      // No scrollIntoView anywhere — monotonic scrolling prevents the
+      // oscillation that stalled loading. Recompute the max each step since
+      // scrollHeight changes as turns render/unrender.
       const topBefore = container.scrollTop;
-      const heightBefore = container.scrollHeight;
-      container.scrollTop = topBefore + Math.max(container.clientHeight * 0.85, 400);
-      if (container.scrollTop <= topBefore + 1) {
-        getMessages().at(-1)?.scrollIntoView({ behavior: 'instant', block: 'end' });
-      }
+      const target = Math.min(topBefore + Math.max(container.clientHeight * 0.6, 300), maxScrollNow());
+      container.scrollTop = target;
       await delay(DELAYS.scrollSettle);
+
+      const grew = seen.size > sizeBefore;
+      const atBottom = container.scrollTop >= maxScrollNow() - 4;
+
+      if (step % 5 === 0 || atBottom) {
+        console.log(`📜 step ${step}: scrollTop=${Math.round(container.scrollTop)}/${Math.round(maxScrollNow())}, DOM=${getMessages().length}, captured=${messages.length}, atBottom=${atBottom}`);
+      }
 
       statusDiv.textContent = `Scanning... (${messages.length} captured)`;
 
-      // Progress = we captured something new, the container scrolled, or more
-      // content loaded (scrollHeight grew). Only stop when none of these hold
-      // for several consecutive rounds — independent of a bottom estimate.
-      const grew = seen.size > sizeBefore;
-      const scrolled = container.scrollTop > topBefore + 1;
-      const heightGrew = container.scrollHeight > heightBefore + 1;
-
-      if (!grew && !scrolled && !heightGrew) {
+      // Stop only once we're actually at the bottom and nothing new is being
+      // captured for a few consecutive rounds.
+      if (atBottom && !grew) {
         stableRounds++;
         if (stableRounds >= SCROLL.stableRounds) break;
       } else {
