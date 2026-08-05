@@ -99,7 +99,7 @@ function setupClaudeExporter() {
       const text = extractText(msg);
       if (!text) continue;
 
-      const who = sender === 'human' ? 'Human' : 'Claude';
+      const who = sender === 'human' ? 'You' : 'Claude';
       const ts = formatTimestamp(msg.created_at);
       const header = ts ? `## ${who} (${ts}):` : `## ${who}:`;
       markdown += `${header}\n\n${text}\n\n---\n\n`;

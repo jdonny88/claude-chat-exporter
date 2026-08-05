@@ -15,7 +15,7 @@ A JavaScript tool that exports Claude.ai conversations to **clean Markdown** by 
 
 1. **Read the conversation & org id** from the page URL and your `lastActiveOrg` cookie
 2. **Fetch the conversation** from `/api/organizations/{org}/chat_conversations/{id}?tree=true&rendering_mode=messages&render_all_tools=true` — the full rendered message list in one request, using your existing session
-3. **Render Markdown** from each message's content blocks, mapping `sender` to `## Human:` / `## Claude:` headers with timestamps
+3. **Render Markdown** from each message's content blocks, mapping `sender` to `## You:` / `## Claude:` headers with timestamps
 
 ### Why the API approach?
 
@@ -51,7 +51,7 @@ The internal API is the same source the page itself renders from, and the export
 ## File Output
 
 - **Filename**: `{conversation-title}.md` (falls back to `claude_conversation`)
-- **Format**: Markdown with `## Human:` / `## Claude:` headers and per-message timestamps
+- **Format**: Markdown with `## You:` / `## Claude:` headers and per-message timestamps
 - **Content**: The full conversation, in order
 
 ## Example Output
@@ -59,7 +59,7 @@ The internal API is the same source the page itself renders from, and the export
 ```markdown
 # Conversation with Claude
 
-## Human (Feb 23, 2026, 10:30 AM):
+## You (Feb 23, 2026, 10:30 AM):
 
 Can you create a comparison table of sorting algorithms?
 
