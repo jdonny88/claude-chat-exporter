@@ -1,0 +1,259 @@
+function setupChatGPTExporter() {
+  // Status indicator
+  const statusDiv = document.createElement('div');
+  statusDiv.style.cssText = `
+    position: fixed; top: 10px; right: 10px; z-index: 10000;
+    background: #10a37f; color: white; padding: 10px 15px;
+    border-radius: 5px; font-family: monospace; font-size: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.3); max-width: 320px;
+  `;
+  document.body.appendChild(statusDiv);
+  function setStatus(text, color) {
+    statusDiv.textContent = text;
+    if (color) statusDiv.style.background = color;
+  }
+
+  function downloadMarkdown(content, filename) {
+    const blob = new Blob([content], { type: 'text/markdown' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  }
+
+  function sanitizeTitle(raw) {
+    return String(raw || '')
+      .replace(/[<>:"/\\|?*]/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/_{2,}/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .toLowerCase()
+      .substring(0, 100);
+  }
+
+  // ChatGPT create_time is a Unix epoch in (fractional) seconds.
+  function formatTimestamp(epochSeconds) {
+    if (!epochSeconds) return null;
+    return new Date(epochSeconds * 1000).toLocaleString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit'
+    });
+  }
+
+  // --- Data source: ChatGPT's own backend API -----------------------------
+
+  function getConversationId() {
+    // URLs look like /c/<uuid> or /g/g-xxxx/c/<uuid>.
+    const m = location.pathname.match(/\/c\/([^/?#]+)/);
+    return m ? m[1] : null;
+  }
+
+  // The web app authenticates backend-api calls with a Bearer token it reads
+  // from the NextAuth session endpoint. Same-origin fetch reuses the user's
+  // existing login cookies — no manual token handling.
+  async function getAccessToken() {
+    try {
+      const res = await fetch('/api/auth/session', { credentials: 'include' });
+      if (!res.ok) return null;
+      const json = await res.json();
+      return json.accessToken || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Team/Enterprise workspaces scope requests to an account id. Best-effort:
+  // only needed if the plain request is rejected.
+  async function getAccountId(token) {
+    const endpoints = [
+      '/backend-api/accounts/check/v4-2023-04-27',
+      '/backend-api/accounts/check'
+    ];
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, {
+          credentials: 'include',
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        if (!res.ok) continue;
+        const json = await res.json();
+        const accounts = json.accounts || {};
+        const ordering = json.account_ordering || Object.keys(accounts);
+        for (const key of ordering) {
+          const id = accounts[key]?.account?.account_id;
+          if (id) return id;
+        }
+      } catch (e) { /* try next */ }
+    }
+    return null;
+  }
+
+  async function fetchConversation(convId, token) {
+    const headers = { 'Authorization': 'Bearer ' + token };
+    const url = '/backend-api/conversation/' + convId;
+
+    let res = await fetch(url, { credentials: 'include', headers });
+    if (res.status === 401 || res.status === 403) {
+      const accountId = await getAccountId(token);
+      if (accountId) {
+        headers['Chatgpt-Account-Id'] = accountId;
+        res = await fetch(url, { credentials: 'include', headers });
+      }
+    }
+    if (!res.ok) {
+      throw new Error(`Conversation fetch failed (HTTP ${res.status})`);
+    }
+    return res.json();
+  }
+
+  // --- Reconstruct the visible conversation from the message tree ----------
+
+  // The conversation is a tree (edits/regenerations create branches). The
+  // currently-visible thread is the path from the active leaf (current_node)
+  // up to the root. Walk parents and reverse to get chronological order.
+  function linearizeActiveBranch(data) {
+    const mapping = data.mapping || {};
+
+    let leafId = data.current_node;
+    if (!leafId || !mapping[leafId]) {
+      // Fallback: from the root, follow the last child down to a leaf.
+      let rootId = Object.keys(mapping).find(id => mapping[id] && !mapping[id].parent);
+      let id = rootId;
+      while (id && mapping[id]?.children?.length) {
+        id = mapping[id].children[mapping[id].children.length - 1];
+      }
+      leafId = id;
+    }
+
+    const nodes = [];
+    let id = leafId;
+    while (id && mapping[id]) {
+      if (mapping[id].message) nodes.push(mapping[id]);
+      id = mapping[id].parent;
+    }
+    nodes.reverse();
+    return nodes;
+  }
+
+  // Whether a message node should appear in the exported transcript.
+  function isVisibleMessage(message) {
+    if (!message) return false;
+    const role = message.author?.role;
+    if (role !== 'user' && role !== 'assistant') return false; // drop system/tool
+    if (message.metadata?.is_visually_hidden_from_conversation) return false;
+    // Assistant messages addressed to a tool (function calls) aren't shown.
+    if (role === 'assistant' && message.recipient && message.recipient !== 'all') return false;
+    return true;
+  }
+
+  // Turn a message's content object into Markdown text.
+  function extractContent(message) {
+    const c = message.content;
+    if (!c) return '';
+    const type = c.content_type;
+
+    // Hidden chain-of-thought / reasoning summaries — not part of the answer.
+    if (type === 'thoughts' || type === 'reasoning_recap') return '';
+
+    if (type === 'text') {
+      return (c.parts || []).filter(p => typeof p === 'string').join('\n\n').trim();
+    }
+
+    if (type === 'code') {
+      const lang = c.language && c.language !== 'unknown' ? c.language : '';
+      return '```' + lang + '\n' + (c.text || '') + '\n```';
+    }
+
+    if (type === 'multimodal_text') {
+      return (c.parts || []).map(p => {
+        if (typeof p === 'string') return p;
+        if (p && p.content_type === 'image_asset_pointer') return '_[image]_';
+        if (p && p.content_type === 'audio_transcription' && p.text) return p.text;
+        return '';
+      }).filter(Boolean).join('\n\n').trim();
+    }
+
+    // Reasonable fallbacks for less common content types.
+    if (Array.isArray(c.parts)) {
+      return c.parts.filter(p => typeof p === 'string').join('\n\n').trim();
+    }
+    if (typeof c.text === 'string') return c.text.trim();
+    return '';
+  }
+
+  function buildMarkdown(data, nodes) {
+    const title = data.title?.trim();
+    let markdown = `# ${title || 'Conversation with ChatGPT'}\n\n`;
+    let count = 0;
+
+    for (const node of nodes) {
+      const message = node.message;
+      if (!isVisibleMessage(message)) continue;
+
+      const content = extractContent(message);
+      if (!content) continue;
+
+      const who = message.author.role === 'user' ? 'You' : 'ChatGPT';
+      const ts = formatTimestamp(message.create_time);
+      const header = ts ? `## ${who} (${ts}):` : `## ${who}:`;
+      markdown += `${header}\n\n${content}\n\n---\n\n`;
+      count++;
+    }
+
+    return { markdown, count };
+  }
+
+  function getFilename(data) {
+    const title = sanitizeTitle(data.title);
+    return `${title || 'chatgpt_conversation'}.md`;
+  }
+
+  // --- Orchestration -------------------------------------------------------
+
+  async function startExport() {
+    try {
+      const convId = getConversationId();
+      if (!convId) {
+        throw new Error('No conversation id in the URL. Open a specific chat (chatgpt.com/c/...) first.');
+      }
+
+      setStatus('Authenticating...');
+      const token = await getAccessToken();
+      if (!token) {
+        throw new Error('Could not read your session token from /api/auth/session. Are you logged in?');
+      }
+
+      setStatus('Fetching conversation...');
+      const data = await fetchConversation(convId, token);
+
+      setStatus('Building Markdown...');
+      const nodes = linearizeActiveBranch(data);
+      const { markdown, count } = buildMarkdown(data, nodes);
+
+      if (count === 0) {
+        throw new Error('No messages found in the conversation payload.');
+      }
+
+      const filename = getFilename(data);
+      downloadMarkdown(markdown, filename);
+
+      setStatus(`✅ Downloaded ${count} messages: ${filename}`, '#10a37f');
+      console.log(`🎉 Export complete — ${count} messages → ${filename}`);
+    } catch (error) {
+      setStatus(`Error: ${error.message}`, '#f44336');
+      console.error('Export failed:', error);
+    } finally {
+      setTimeout(() => {
+        if (document.body.contains(statusDiv)) document.body.removeChild(statusDiv);
+      }, 6000);
+    }
+  }
+
+  startExport();
+}
+
+// Run the exporter
+setupChatGPTExporter();

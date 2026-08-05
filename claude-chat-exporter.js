@@ -1,22 +1,17 @@
 function setupClaudeExporter() {
-  const originalWriteText = navigator.clipboard.writeText;
-  const capturedResponses = [];
-  const humanMessages = [];
-  let conversationData = null;
-  let currentCapture = capturedResponses;
-  let interceptorActive = true;
-
-  // DOM Selectors - easily modifiable if Claude's UI changes
-  const SELECTORS = {
-    copyButton: 'button[data-testid="action-bar-copy"]',
-    conversationTitle: '[data-testid="chat-title-button"] .truncate, button[data-testid="chat-title-button"] div.truncate',
-    messageActionsGroup: '[role="group"][aria-label="Message actions"]',
-    feedbackButton: 'button[aria-label="Give positive feedback"]'
-  };
-
-  const DELAYS = {
-    copy: 100
-  };
+  // Status indicator
+  const statusDiv = document.createElement('div');
+  statusDiv.style.cssText = `
+    position: fixed; top: 10px; right: 10px; z-index: 10000;
+    background: #2196F3; color: white; padding: 10px 15px;
+    border-radius: 5px; font-family: monospace; font-size: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.3); max-width: 320px;
+  `;
+  document.body.appendChild(statusDiv);
+  function setStatus(text, color) {
+    statusDiv.textContent = text;
+    if (color) statusDiv.style.background = color;
+  }
 
   function downloadMarkdown(content, filename) {
     const blob = new Blob([content], { type: 'text/markdown' });
@@ -29,8 +24,14 @@ function setupClaudeExporter() {
     URL.revokeObjectURL(a.href);
   }
 
-  function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  function sanitizeTitle(raw) {
+    return String(raw || '')
+      .replace(/[<>:"/\\|?*]/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/_{2,}/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .toLowerCase()
+      .substring(0, 100);
   }
 
   // Format ISO timestamp to readable format
@@ -42,249 +43,131 @@ function setupClaudeExporter() {
     });
   }
 
-  // Fetch conversation data from Claude API to get timestamps
+  // --- Data source: Claude's own conversation API --------------------------
+
   async function fetchConversationData() {
-    try {
-      const conversationId = window.location.pathname.split('/').pop();
-      const orgId = document.cookie.match(/lastActiveOrg=([^;]+)/)?.[1];
+    const conversationId = window.location.pathname.split('/').pop();
+    const orgId = document.cookie.match(/lastActiveOrg=([^;]+)/)?.[1];
 
-      if (!conversationId || !orgId) {
-        console.warn('Could not get conversation/org ID');
-        return null;
-      }
-
-      const url = `/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=true&rendering_mode=messages&render_all_tools=true`;
-
-      const response = await fetch(url, {
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' }
-      });
-
-      if (!response.ok) {
-        console.warn(`API error: ${response.status}`);
-        return null;
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.warn('Failed to fetch conversation data:', error);
-      return null;
-    }
-  }
-
-  // Build a content → timestamp map for human messages from API response.
-  // Matching by content avoids index misalignment caused by hidden/system
-  // messages that the API returns but the UI does not display.
-  function getMessageTimestamps(data) {
-    const map = new Map();
-    if (!data?.chat_messages) return map;
-
-    for (const msg of data.chat_messages) {
-      if (msg.sender === 'human') {
-        const text = msg.content?.map(c => c.text ?? '').join('').trim();
-        if (text) map.set(text, formatTimestamp(msg.created_at));
-      }
+    if (!conversationId || !orgId) {
+      throw new Error('Could not read conversation/org id. Open a specific chat first.');
     }
 
-    return map;
-  }
+    const url = `/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=true&rendering_mode=messages&render_all_tools=true`;
 
-  function getConversationTitle() {
-    // First try to get from API data
-    if (conversationData?.name) {
-      const title = conversationData.name.trim();
-      if (title && title !== 'New conversation') {
-        return title
-          .replace(/[<>:"/\\|?*]/g, '_')
-          .replace(/\s+/g, '_')
-          .replace(/_{2,}/g, '_')
-          .replace(/^_+|_+$/g, '')
-          .toLowerCase()
-          .substring(0, 100);
-      }
-    }
-
-    // Fallback to DOM
-    const titleElement = document.querySelector(SELECTORS.conversationTitle);
-    const title = titleElement?.textContent?.trim();
-
-    if (!title || title === 'Claude' || title.includes('New conversation')) {
-      return 'claude_conversation';
-    }
-
-    return title
-      .replace(/[<>:"/\\|?*]/g, '_')
-      .replace(/\s+/g, '_')
-      .replace(/_{2,}/g, '_')
-      .replace(/^_+|_+$/g, '')
-      .toLowerCase()
-      .substring(0, 100);
-  }
-
-  // Intercept clipboard writes and route to the active capture target
-  navigator.clipboard.writeText = function(text) {
-    if (interceptorActive && text) {
-      const type = currentCapture === humanMessages ? 'user' : 'claude';
-      console.log(`📋 Captured ${type} message ${currentCapture.length + 1}`);
-      currentCapture.push({ type, content: text });
-      updateStatus();
-    }
-  };
-
-  // Create status indicator
-  const statusDiv = document.createElement('div');
-  statusDiv.style.cssText = `
-    position: fixed; top: 10px; right: 10px; z-index: 10000;
-    background: #2196F3; color: white; padding: 10px 15px;
-    border-radius: 5px; font-family: monospace; font-size: 12px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.3); max-width: 300px;
-  `;
-  document.body.appendChild(statusDiv);
-
-  function updateStatus() {
-    statusDiv.textContent = `Human: ${humanMessages.length} | Claude: ${capturedResponses.length}`;
-  }
-
-  // Returns copy buttons from action bars filtered by message type.
-  // claudeOnly=true  → action bars WITH a feedback button (Claude responses)
-  // claudeOnly=false → action bars WITHOUT a feedback button (human messages)
-  function getCopyButtons(claudeOnly) {
-    const actionGroups = document.querySelectorAll(SELECTORS.messageActionsGroup);
-    const buttons = [];
-    actionGroups.forEach(group => {
-      const hasFeedback = !!group.querySelector(SELECTORS.feedbackButton);
-      if (hasFeedback === claudeOnly) {
-        const copyBtn = group.querySelector(SELECTORS.copyButton);
-        if (copyBtn) buttons.push(copyBtn);
-      }
+    const response = await fetch(url, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }
     });
-    return buttons;
-  }
 
-  async function triggerCopyButtons(buttons) {
-    for (let i = 0; i < buttons.length; i++) {
-      try {
-        if (buttons[i].offsetParent !== null) {
-          buttons[i].scrollIntoView({ behavior: 'instant', block: 'nearest' });
-          buttons[i].click();
-          console.log(`🖱️ Clicked copy button ${i + 1}/${buttons.length}`);
-        }
-      } catch (error) {
-        console.warn(`Failed to click button ${i + 1}:`, error);
-      }
-
-      // Only delay between clicks, not after the last one
-      if (i < buttons.length - 1) {
-        await delay(DELAYS.copy);
-      }
+    if (!response.ok) {
+      throw new Error(`Conversation fetch failed (HTTP ${response.status})`);
     }
+    return response.json();
   }
 
-  function buildMarkdown(timestamps) {
-    let markdown = "# Conversation with Claude\n\n";
-    const maxLength = Math.max(humanMessages.length, capturedResponses.length);
+  // --- Reconstruct the transcript from the message list --------------------
 
-    for (let i = 0; i < maxLength; i++) {
-      if (i < humanMessages.length && humanMessages[i].content) {
-        const ts = timestamps?.get(humanMessages[i].content?.trim());
-        const header = ts ? `## Human (${ts}):` : `## Human:`;
-        markdown += `${header}\n\n${humanMessages[i].content}\n\n---\n\n`;
-      }
-      if (i < capturedResponses.length) {
-        markdown += `## Claude:\n\n${capturedResponses[i].content}\n\n---\n\n`;
+  // Join the text of a message's content blocks. Text blocks carry `.text`
+  // (the raw Markdown Claude produced / the user typed); thinking, tool_use,
+  // tool_result and artifact blocks have no `.text` and are skipped, which
+  // matches the exporter's long-standing behavior.
+  function extractText(msg) {
+    if (!Array.isArray(msg.content)) return '';
+    return msg.content
+      .map(block => (typeof block.text === 'string' ? block.text : ''))
+      .filter(Boolean)
+      .join('\n\n')
+      .trim();
+  }
+
+  // Claude's data doesn't return image bytes inline the way ChatGPT's does, so
+  // we emit a placeholder for anything image-like. Uploads can appear either as
+  // `image` content blocks or (more commonly on claude.ai) in message-level
+  // file arrays, so check both. Best-effort across the likely field names.
+  function extractImagePlaceholders(msg) {
+    const placeholders = [];
+
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block && block.type === 'image') placeholders.push('_[image]_');
       }
     }
 
-    return markdown;
-  }
-
-  async function waitForClipboardOperations(targetArray, expectedCount) {
-    const maxWaitTime = 2000;
-    const checkInterval = 100;
-    let elapsed = 0;
-
-    while (elapsed < maxWaitTime) {
-      if (targetArray.length >= expectedCount) {
-        console.log(`✅ All ${expectedCount} responses captured in ${elapsed}ms`);
-        return;
+    const fileArrays = [msg.files_v2, msg.files, msg.attachments].filter(Array.isArray);
+    for (const arr of fileArrays) {
+      for (const f of arr) {
+        const name = f?.file_name || f?.name || '';
+        const kind = String(f?.file_kind || f?.type || f?.file_type || '').toLowerCase();
+        const looksImage = kind.includes('image') || /\.(png|jpe?g|gif|webp|bmp|svg|heic)$/i.test(name);
+        if (looksImage) placeholders.push(name ? `_[image: ${name}]_` : '_[image]_');
       }
-      await delay(checkInterval);
-      elapsed += checkInterval;
     }
 
-    console.warn(`⚠️ Timeout: Only captured ${targetArray.length}/${expectedCount} responses`);
+    return placeholders;
   }
+
+  function getConversationTitle(data) {
+    const name = sanitizeTitle(data?.name);
+    if (name && name !== 'new_conversation') return name;
+    return 'claude_conversation';
+  }
+
+  function buildMarkdown(data) {
+    const messages = data?.chat_messages || [];
+    let markdown = '# Conversation with Claude\n\n';
+    let count = 0;
+
+    for (const msg of messages) {
+      const sender = msg.sender; // 'human' | 'assistant'
+      if (sender !== 'human' && sender !== 'assistant') continue;
+
+      const text = extractText(msg);
+      const images = extractImagePlaceholders(msg);
+      // Image placeholders first (they're attached above the message text).
+      const body = [images.join('\n'), text].filter(Boolean).join('\n\n');
+      if (!body) continue;
+
+      const who = sender === 'human' ? 'You' : 'Claude';
+      const ts = formatTimestamp(msg.created_at);
+      const header = ts ? `## ${who} (${ts}):` : `## ${who}:`;
+      markdown += `${header}\n\n${body}\n\n---\n\n`;
+      count++;
+    }
+
+    return { markdown, count };
+  }
+
+  // --- Orchestration -------------------------------------------------------
 
   async function startExport() {
     try {
-      // Fetch conversation data from API (for timestamps and title)
-      statusDiv.textContent = 'Fetching conversation data...';
-      conversationData = await fetchConversationData();
-      const timestamps = getMessageTimestamps(conversationData);
+      setStatus('Fetching conversation...');
+      const data = await fetchConversationData();
 
-      if (conversationData) {
-        console.log(`📅 Got timestamps for ${timestamps.size} human messages`);
+      setStatus('Building Markdown...');
+      const { markdown, count } = buildMarkdown(data);
+
+      if (count === 0) {
+        throw new Error('No messages found in the conversation payload.');
       }
 
-      const humanButtons = getCopyButtons(false);
-      const claudeButtons = getCopyButtons(true);
+      const filename = `${getConversationTitle(data)}.md`;
+      downloadMarkdown(markdown, filename);
 
-      if (humanButtons.length === 0 && claudeButtons.length === 0) {
-        throw new Error('No copy buttons found!');
-      }
-
-      // Phase 1: Human messages
-      statusDiv.textContent = 'Copying human messages...';
-      currentCapture = humanMessages;
-      await triggerCopyButtons(humanButtons);
-      await waitForClipboardOperations(humanMessages, humanButtons.length);
-
-      // Phase 2: Claude responses
-      statusDiv.textContent = 'Copying Claude responses...';
-      currentCapture = capturedResponses;
-      await triggerCopyButtons(claudeButtons);
-      await waitForClipboardOperations(capturedResponses, claudeButtons.length);
-
-      completeExport(timestamps);
-
+      setStatus(`✅ Downloaded ${count} messages: ${filename}`, '#4CAF50');
+      console.log(`🎉 Export complete — ${count} messages → ${filename}`);
     } catch (error) {
-      statusDiv.textContent = `Error: ${error.message}`;
-      statusDiv.style.background = '#f44336';
+      setStatus(`Error: ${error.message}`, '#f44336');
       console.error('Export failed:', error);
     } finally {
-      setTimeout(cleanup, 3000);
+      setTimeout(() => {
+        if (document.body.contains(statusDiv)) document.body.removeChild(statusDiv);
+      }, 6000);
     }
   }
 
-  function completeExport(timestamps) {
-    interceptorActive = false;
-
-    if (humanMessages.length === 0 && capturedResponses.length === 0) {
-      statusDiv.textContent = 'No messages captured!';
-      statusDiv.style.background = '#f44336';
-      return;
-    }
-
-    const markdown = buildMarkdown(timestamps);
-    const filename = `${getConversationTitle()}.md`;
-    downloadMarkdown(markdown, filename);
-
-    statusDiv.textContent = `✅ Downloaded: ${filename}`;
-    statusDiv.style.background = '#4CAF50';
-
-    console.log('🎉 Export complete!');
-  }
-
-  function cleanup() {
-    navigator.clipboard.writeText = originalWriteText;
-    if (document.body.contains(statusDiv)) {
-      document.body.removeChild(statusDiv);
-    }
-  }
-
-  // Initialize
-  updateStatus();
-  setTimeout(startExport, 1000);
+  startExport();
 }
 
 // Run the exporter
