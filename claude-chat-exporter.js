@@ -81,6 +81,32 @@ function setupClaudeExporter() {
       .trim();
   }
 
+  // Claude's data doesn't return image bytes inline the way ChatGPT's does, so
+  // we emit a placeholder for anything image-like. Uploads can appear either as
+  // `image` content blocks or (more commonly on claude.ai) in message-level
+  // file arrays, so check both. Best-effort across the likely field names.
+  function extractImagePlaceholders(msg) {
+    const placeholders = [];
+
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block && block.type === 'image') placeholders.push('_[image]_');
+      }
+    }
+
+    const fileArrays = [msg.files_v2, msg.files, msg.attachments].filter(Array.isArray);
+    for (const arr of fileArrays) {
+      for (const f of arr) {
+        const name = f?.file_name || f?.name || '';
+        const kind = String(f?.file_kind || f?.type || f?.file_type || '').toLowerCase();
+        const looksImage = kind.includes('image') || /\.(png|jpe?g|gif|webp|bmp|svg|heic)$/i.test(name);
+        if (looksImage) placeholders.push(name ? `_[image: ${name}]_` : '_[image]_');
+      }
+    }
+
+    return placeholders;
+  }
+
   function getConversationTitle(data) {
     const name = sanitizeTitle(data?.name);
     if (name && name !== 'new_conversation') return name;
@@ -97,12 +123,15 @@ function setupClaudeExporter() {
       if (sender !== 'human' && sender !== 'assistant') continue;
 
       const text = extractText(msg);
-      if (!text) continue;
+      const images = extractImagePlaceholders(msg);
+      // Image placeholders first (they're attached above the message text).
+      const body = [images.join('\n'), text].filter(Boolean).join('\n\n');
+      if (!body) continue;
 
       const who = sender === 'human' ? 'You' : 'Claude';
       const ts = formatTimestamp(msg.created_at);
       const header = ts ? `## ${who} (${ts}):` : `## ${who}:`;
-      markdown += `${header}\n\n${text}\n\n---\n\n`;
+      markdown += `${header}\n\n${body}\n\n---\n\n`;
       count++;
     }
 
