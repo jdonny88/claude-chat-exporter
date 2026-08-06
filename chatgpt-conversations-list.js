@@ -110,8 +110,6 @@ function listChatGPTConversations() {
 
       const first = await probe.json();
       const items = [...(first.items || [])];
-      const reportedTotal = first.total;
-      console.log(`📄 page 0: ${items.length} items (API reports total=${reportedTotal})`);
 
       // Keep paging until a page comes back SHORT (fewer than a full page).
       // Deliberately does NOT trust the API's `total`, which under-reports and
@@ -123,7 +121,6 @@ function listChatGPTConversations() {
         if (!res.ok) break;
         const json = await res.json();
         const batch = json.items || [];
-        console.log(`📄 page ${page} (offset ${page * PAGE_LIMIT}): ${batch.length} items`);
         items.push(...batch);
         if (batch.length < PAGE_LIMIT) done = true;
       }
