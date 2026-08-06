@@ -62,7 +62,7 @@ function listClaudeConversations() {
 
   // Collapse a (possibly long, Markdown-formatted) summary into a short,
   // single-line preview suitable for a table cell.
-  function summarize(s, max = 160) {
+  function summarize(s, max = 350) {
     if (!s) return '';
     const clean = String(s).replace(/[#*_`>]/g, '').replace(/\s+/g, ' ').trim();
     return clean.length > max ? clean.slice(0, max - 1).trimEnd() + '…' : clean;
