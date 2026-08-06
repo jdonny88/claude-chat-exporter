@@ -98,11 +98,15 @@ If Claude changes its API, update these in the script:
 
 Want an index of every conversation rather than one chat's contents? Run
 [`claude-conversations-list.js`](./claude-conversations-list.js) the same way
-(open claude.ai, paste into the console). It downloads
-`claude-conversations.md` — a table of every conversation with its title,
-model, created/updated timestamps, flags (⭐ starred · 📁 in a project), a
-short summary preview, and a link — and also prints a `console.table`. It
-lists conversations only; it does not export their messages.
+(open claude.ai, paste into the console). It downloads **two** files:
+
+- `claude-conversations.md` — a compact table of every conversation (title,
+  model, created/updated timestamps, flags ⭐ starred · 📁 in a project, link)
+- `claude-conversations-summaries.md` — one section per conversation with its
+  **full** generated summary
+
+It also prints a `console.table`. It lists conversations only; it does not
+export their messages. (Your browser may ask to allow multiple downloads.)
 
 ## Sibling: ChatGPT Exporter
 
