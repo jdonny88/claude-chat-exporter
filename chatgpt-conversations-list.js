@@ -27,10 +27,14 @@ function listChatGPTConversations() {
     URL.revokeObjectURL(a.href);
   }
 
-  // ChatGPT create_time / update_time are Unix epoch seconds.
-  function fmt(epochSeconds) {
-    if (!epochSeconds) return '';
-    return new Date(epochSeconds * 1000).toLocaleString('en-US', {
+  // The conversations LIST endpoint returns create_time / update_time as ISO
+  // strings, while the single-conversation endpoint uses epoch seconds. Handle
+  // both: numbers are epoch seconds, strings are parsed directly.
+  function fmt(value) {
+    if (value == null || value === '') return '';
+    const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString('en-US', {
       year: 'numeric', month: 'short', day: 'numeric',
       hour: 'numeric', minute: '2-digit'
     });
