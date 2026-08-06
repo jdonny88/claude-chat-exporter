@@ -100,8 +100,9 @@ Want an index of every conversation rather than one chat's contents? Run
 [`claude-conversations-list.js`](./claude-conversations-list.js) the same way
 (open claude.ai, paste into the console). It downloads
 `claude-conversations.md` — a table of every conversation with its title,
-created/updated timestamps, and a link — and also prints a `console.table`.
-It lists conversations only; it does not export their messages.
+model, created/updated timestamps, flags (⭐ starred · 📁 in a project), a
+short summary preview, and a link — and also prints a `console.table`. It
+lists conversations only; it does not export their messages.
 
 ## Sibling: ChatGPT Exporter
 

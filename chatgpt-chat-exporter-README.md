@@ -108,9 +108,10 @@ Want an index of every conversation rather than one chat's contents? Run
 [`chatgpt-conversations-list.js`](./chatgpt-conversations-list.js) the same way
 (open chatgpt.com, paste into the console). It pages through your whole
 conversation history and downloads `chatgpt-conversations.md` — a table of
-every conversation with its title, created/updated timestamps, and a link —
-and also prints a `console.table`. It lists conversations only; it does not
-export their messages.
+every conversation with its title, created/updated timestamps, flags
+(⭐ starred · 📌 pinned · 🗄️ archived · 🤖 custom GPT), and a link — and also
+prints a `console.table`. It lists conversations only; it does not export
+their messages.
 
 ## Comparison with the Claude Exporter
 
