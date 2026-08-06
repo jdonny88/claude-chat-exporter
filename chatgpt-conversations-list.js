@@ -77,16 +77,26 @@ function listChatGPTConversations() {
     return fetch(url, { credentials: 'include', headers });
   }
 
+  function flags(c) {
+    const f = [];
+    if (c.is_starred) f.push('⭐');
+    if (c.pinned_time) f.push('📌');
+    if (c.is_archived) f.push('🗄️');
+    if (c.gizmo_id) f.push('🤖');
+    return f.join(' ');
+  }
+
   function buildMarkdown(items) {
     const now = new Date().toLocaleString('en-US');
     let md = `# ChatGPT Conversations\n\n`;
     md += `_${items.length} conversations · generated ${now}_\n\n`;
-    md += `| # | Title | Created | Updated | Link |\n`;
-    md += `| - | ----- | ------- | ------- | ---- |\n`;
+    md += `_Flags: ⭐ starred · 📌 pinned · 🗄️ archived · 🤖 custom GPT_\n\n`;
+    md += `| # | Title | Created | Updated | Flags | Link |\n`;
+    md += `| - | ----- | ------- | ------- | ----- | ---- |\n`;
     items.forEach((c, i) => {
       const title = escapeCell(c.title || '(untitled)');
       const url = `https://chatgpt.com/c/${c.id}`;
-      md += `| ${i + 1} | ${title} | ${fmt(c.create_time)} | ${fmt(c.update_time)} | ${url} |\n`;
+      md += `| ${i + 1} | ${title} | ${fmt(c.create_time)} | ${fmt(c.update_time)} | ${flags(c)} | ${url} |\n`;
     });
     return md;
   }
@@ -135,6 +145,10 @@ function listChatGPTConversations() {
         title: c.title || '(untitled)',
         created: fmt(c.create_time),
         updated: fmt(c.update_time),
+        starred: !!c.is_starred,
+        pinned: !!c.pinned_time,
+        archived: !!c.is_archived,
+        gpt: !!c.gizmo_id,
         url: `https://chatgpt.com/c/${c.id}`
       })));
 
