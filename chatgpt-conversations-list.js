@@ -110,17 +110,22 @@ function listChatGPTConversations() {
 
       const first = await probe.json();
       const items = [...(first.items || [])];
-      const total = first.total ?? items.length;
+      const reportedTotal = first.total;
+      console.log(`📄 page 0: ${items.length} items (API reports total=${reportedTotal})`);
 
-      // Remaining pages.
-      for (let page = 1; page < MAX_PAGES && items.length < total; page++) {
-        setStatus(`Fetching conversations... (${items.length}/${total})`);
+      // Keep paging until a page comes back SHORT (fewer than a full page).
+      // Deliberately does NOT trust the API's `total`, which under-reports and
+      // would stop us early (e.g. at 200) while older conversations remain.
+      let done = (first.items || []).length < PAGE_LIMIT;
+      for (let page = 1; page < MAX_PAGES && !done; page++) {
+        setStatus(`Fetching conversations... (${items.length})`);
         const res = await fetchPage(page * PAGE_LIMIT, headers);
         if (!res.ok) break;
         const json = await res.json();
         const batch = json.items || [];
-        if (batch.length === 0) break;
+        console.log(`📄 page ${page} (offset ${page * PAGE_LIMIT}): ${batch.length} items`);
         items.push(...batch);
+        if (batch.length < PAGE_LIMIT) done = true;
       }
 
       if (items.length === 0) throw new Error('No conversations returned.');
