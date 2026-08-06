@@ -53,16 +53,32 @@ function listClaudeConversations() {
     return res.json();
   }
 
+  function flags(c) {
+    const f = [];
+    if (c.is_starred) f.push('⭐');
+    if (c.project_uuid) f.push('📁');
+    return f.join(' ');
+  }
+
+  // Collapse a (possibly long, Markdown-formatted) summary into a short,
+  // single-line preview suitable for a table cell.
+  function summarize(s, max = 160) {
+    if (!s) return '';
+    const clean = String(s).replace(/[#*_`>]/g, '').replace(/\s+/g, ' ').trim();
+    return clean.length > max ? clean.slice(0, max - 1).trimEnd() + '…' : clean;
+  }
+
   function buildMarkdown(items) {
     const now = new Date().toLocaleString('en-US');
     let md = `# Claude Conversations\n\n`;
     md += `_${items.length} conversations · generated ${now}_\n\n`;
-    md += `| # | Title | Created | Updated | Link |\n`;
-    md += `| - | ----- | ------- | ------- | ---- |\n`;
+    md += `_Flags: ⭐ starred · 📁 in a project_\n\n`;
+    md += `| # | Title | Model | Created | Updated | Flags | Summary | Link |\n`;
+    md += `| - | ----- | ----- | ------- | ------- | ----- | ------- | ---- |\n`;
     items.forEach((c, i) => {
       const title = escapeCell(c.name || '(untitled)');
       const url = `https://claude.ai/chat/${c.uuid}`;
-      md += `| ${i + 1} | ${title} | ${fmt(c.created_at)} | ${fmt(c.updated_at)} | ${url} |\n`;
+      md += `| ${i + 1} | ${title} | ${escapeCell(c.model || '')} | ${fmt(c.created_at)} | ${fmt(c.updated_at)} | ${flags(c)} | ${escapeCell(summarize(c.summary))} | ${url} |\n`;
     });
     return md;
   }
@@ -87,8 +103,11 @@ function listClaudeConversations() {
       // Quick in-console view.
       console.table(items.map(c => ({
         title: c.name || '(untitled)',
+        model: c.model || '',
         created: fmt(c.created_at),
         updated: fmt(c.updated_at),
+        starred: !!c.is_starred,
+        project: !!c.project_uuid,
         url: `https://claude.ai/chat/${c.uuid}`
       })));
 
