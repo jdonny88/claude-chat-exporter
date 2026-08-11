@@ -94,6 +94,20 @@ If Claude changes its API, update these in the script:
 - Org id source: the `lastActiveOrg` cookie
 - Message fields used: `chat_messages[]`, per-message `sender` (`human`/`assistant`), `content[].text`, `created_at`, and the conversation `name`
 
+## List all conversations
+
+Want an index of every conversation rather than one chat's contents? Run
+[`claude-conversations-list.js`](./claude-conversations-list.js) the same way
+(open claude.ai, paste into the console). It downloads **two** files:
+
+- `claude-conversations.md` — a compact table of every conversation (title,
+  model, created/updated timestamps, flags ⭐ starred · 📁 in a project, link)
+- `claude-conversations-summaries.md` — one section per conversation with its
+  **full** generated summary
+
+It also prints a `console.table`. It lists conversations only; it does not
+export their messages. (Your browser may ask to allow multiple downloads.)
+
 ## Sibling: ChatGPT Exporter
 
 This repo also ships [`chatgpt-chat-exporter.js`](./chatgpt-chat-exporter.js), which does the same thing for chatgpt.com using ChatGPT's backend API. See [chatgpt-chat-exporter-README.md](./chatgpt-chat-exporter-README.md).

@@ -102,6 +102,17 @@ The tool depends on three ChatGPT endpoints. If OpenAI renames them, update thes
 
 The message tree fields used are `mapping`, `current_node`, and per-message `author.role`, `content` (`content_type` + `parts`/`text`), `create_time`, `recipient`, and `metadata.is_visually_hidden_from_conversation`.
 
+## List all conversations
+
+Want an index of every conversation rather than one chat's contents? Run
+[`chatgpt-conversations-list.js`](./chatgpt-conversations-list.js) the same way
+(open chatgpt.com, paste into the console). It pages through your whole
+conversation history and downloads `chatgpt-conversations.md` — a table of
+every conversation with its title, created/updated timestamps, flags
+(⭐ starred · 📌 pinned · 🗄️ archived · 🤖 custom GPT), and a link — and also
+prints a `console.table`. It lists conversations only; it does not export
+their messages.
+
 ## Comparison with the Claude Exporter
 
 | Aspect | Claude Exporter | ChatGPT Exporter |
