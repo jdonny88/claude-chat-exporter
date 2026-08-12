@@ -113,11 +113,39 @@ function setupClaudeExporter() {
     return 'claude_conversation';
   }
 
+  // Render an ordered list of {who, role, ts, content} into Markdown, grouping
+  // messages into exchanges and numbering both. An exchange begins at each
+  // user message (and at the first message if it isn't a user message). A
+  // horizontal rule separates exchanges; there is none between messages within
+  // an exchange.
+  function renderConversation(headerBlock, rendered) {
+    let e = 0;
+    rendered.forEach((m, i) => {
+      if (m.role === 'user' || i === 0) e++;
+      m.exchange = e;
+    });
+    const totalExchanges = e;
+    const total = rendered.length;
+
+    let md = headerBlock;
+    rendered.forEach((m, i) => {
+      if (i === 0 || m.exchange !== rendered[i - 1].exchange) {
+        if (i !== 0) md += `---\n\n`;
+        md += `## Exchange ${m.exchange}/${totalExchanges}\n\n`;
+      }
+      const num = `${i + 1}/${total}`;
+      const header = m.ts ? `## Message ${num} - ${m.who} (${m.ts}):` : `## Message ${num} - ${m.who}:`;
+      md += `${header}\n\n${m.content}\n\n`;
+    });
+    return md;
+  }
+
   function buildMarkdown(data) {
     const messages = data?.chat_messages || [];
-    let markdown = '# Conversation with Claude\n\n';
-    let count = 0;
 
+    // Collect the renderable messages first so we can number them and group
+    // them into exchanges.
+    const rendered = [];
     for (const msg of messages) {
       const sender = msg.sender; // 'human' | 'assistant'
       if (sender !== 'human' && sender !== 'assistant') continue;
@@ -128,14 +156,16 @@ function setupClaudeExporter() {
       const body = [images.join('\n'), text].filter(Boolean).join('\n\n');
       if (!body) continue;
 
-      const who = sender === 'human' ? 'You' : 'Claude';
-      const ts = formatTimestamp(msg.created_at);
-      const header = ts ? `## ${who} (${ts}):` : `## ${who}:`;
-      markdown += `${header}\n\n${body}\n\n---\n\n`;
-      count++;
+      rendered.push({
+        role: sender === 'human' ? 'user' : 'assistant',
+        who: sender === 'human' ? 'You' : 'Claude',
+        ts: formatTimestamp(msg.created_at),
+        content: body
+      });
     }
 
-    return { markdown, count };
+    const markdown = renderConversation('# Conversation with Claude\n\n', rendered);
+    return { markdown, count: rendered.length };
   }
 
   // --- Orchestration -------------------------------------------------------
