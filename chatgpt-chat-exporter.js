@@ -184,26 +184,54 @@ function setupChatGPTExporter() {
     return '';
   }
 
+  // Render an ordered list of {who, role, ts, content} into Markdown, grouping
+  // messages into exchanges and numbering both. An exchange begins at each
+  // user message (and at the first message if it isn't a user message). A
+  // horizontal rule separates exchanges; there is none between messages within
+  // an exchange.
+  function renderConversation(headerBlock, rendered) {
+    let e = 0;
+    rendered.forEach((m, i) => {
+      if (m.role === 'user' || i === 0) e++;
+      m.exchange = e;
+    });
+    const totalExchanges = e;
+    const total = rendered.length;
+
+    let md = headerBlock;
+    rendered.forEach((m, i) => {
+      if (i === 0 || m.exchange !== rendered[i - 1].exchange) {
+        if (i !== 0) md += `---\n\n`;
+        md += `## Exchange ${m.exchange}/${totalExchanges}\n\n`;
+      }
+      const num = `${i + 1}/${total}`;
+      const header = m.ts ? `## ${num} - ${m.who} (${m.ts}):` : `## ${num} - ${m.who}:`;
+      md += `${header}\n\n${m.content}\n\n`;
+    });
+    return md;
+  }
+
   function buildMarkdown(data, nodes) {
     const title = data.title?.trim();
-    let markdown = `# ${title || 'Conversation with ChatGPT'}\n\n`;
-    let count = 0;
 
+    // Collect the renderable messages first so we can number them and group
+    // them into exchanges.
+    const rendered = [];
     for (const node of nodes) {
       const message = node.message;
       if (!isVisibleMessage(message)) continue;
-
       const content = extractContent(message);
       if (!content) continue;
-
-      const who = message.author.role === 'user' ? 'You' : 'ChatGPT';
-      const ts = formatTimestamp(message.create_time);
-      const header = ts ? `## ${who} (${ts}):` : `## ${who}:`;
-      markdown += `${header}\n\n${content}\n\n---\n\n`;
-      count++;
+      rendered.push({
+        role: message.author.role, // 'user' | 'assistant'
+        who: message.author.role === 'user' ? 'You' : 'ChatGPT',
+        ts: formatTimestamp(message.create_time),
+        content
+      });
     }
 
-    return { markdown, count };
+    const markdown = renderConversation(`# ${title || 'Conversation with ChatGPT'}\n\n`, rendered);
+    return { markdown, count: rendered.length };
   }
 
   function getFilename(data) {

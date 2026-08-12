@@ -60,16 +60,20 @@ Reading the backend API instead makes all of those problems disappear:
 
 ## Example Output
 
+Messages are grouped into **exchanges** (one of your messages plus the reply
+that follows) and numbered globally, so you can navigate and reference specific
+turns. A horizontal rule separates exchanges.
+
 ```markdown
 # Sorting algorithms comparison
 
-## You (Feb 23, 2026, 10:30 AM):
+## Exchange 1/12
+
+## 1/24 - You (Feb 23, 2026, 10:30 AM):
 
 Can you create a comparison table of sorting algorithms?
 
----
-
-## ChatGPT (Feb 23, 2026, 10:30 AM):
+## 2/24 - ChatGPT (Feb 23, 2026, 10:30 AM):
 
 Here's a comparison table of sorting algorithms:
 
@@ -80,6 +84,12 @@ Here's a comparison table of sorting algorithms:
 | Merge Sort  | O(n log n) | O(n log n)   | O(n log n) | O(n)     | Yes    |
 
 ---
+
+## Exchange 2/12
+
+## 3/24 - You (Feb 23, 2026, 10:32 AM):
+
+...
 ```
 
 ## Troubleshooting

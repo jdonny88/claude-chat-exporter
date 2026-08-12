@@ -56,16 +56,20 @@ The internal API is the same source the page itself renders from, and the export
 
 ## Example Output
 
+Messages are grouped into **exchanges** (one of your messages plus the reply
+that follows) and numbered globally, so you can navigate and reference specific
+turns. A horizontal rule separates exchanges.
+
 ```markdown
 # Conversation with Claude
 
-## You (Feb 23, 2026, 10:30 AM):
+## Exchange 1/12
+
+## 1/24 - You (Feb 23, 2026, 10:30 AM):
 
 Can you create a comparison table of sorting algorithms?
 
----
-
-## Claude (Feb 23, 2026, 10:30 AM):
+## 2/24 - Claude (Feb 23, 2026, 10:30 AM):
 
 Here's a comprehensive comparison table of sorting algorithms:
 
@@ -76,6 +80,12 @@ Here's a comprehensive comparison table of sorting algorithms:
 | Merge Sort  | O(n log n) | O(n log n)   | O(n log n) | O(n)     | Yes    |
 
 ---
+
+## Exchange 2/12
+
+## 3/24 - You (Feb 23, 2026, 10:32 AM):
+
+...
 ```
 
 ## Troubleshooting
