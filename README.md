@@ -65,11 +65,11 @@ turns. A horizontal rule separates exchanges.
 
 ## Exchange 1/12
 
-## 1/24 - You (Feb 23, 2026, 10:30 AM):
+## Message 1/24 - You (Feb 23, 2026, 10:30 AM):
 
 Can you create a comparison table of sorting algorithms?
 
-## 2/24 - Claude (Feb 23, 2026, 10:30 AM):
+## Message 2/24 - Claude (Feb 23, 2026, 10:30 AM):
 
 Here's a comprehensive comparison table of sorting algorithms:
 
@@ -83,7 +83,7 @@ Here's a comprehensive comparison table of sorting algorithms:
 
 ## Exchange 2/12
 
-## 3/24 - You (Feb 23, 2026, 10:32 AM):
+## Message 3/24 - You (Feb 23, 2026, 10:32 AM):
 
 ...
 ```

@@ -134,7 +134,7 @@ function setupClaudeExporter() {
         md += `## Exchange ${m.exchange}/${totalExchanges}\n\n`;
       }
       const num = `${i + 1}/${total}`;
-      const header = m.ts ? `## ${num} - ${m.who} (${m.ts}):` : `## ${num} - ${m.who}:`;
+      const header = m.ts ? `## Message ${num} - ${m.who} (${m.ts}):` : `## Message ${num} - ${m.who}:`;
       md += `${header}\n\n${m.content}\n\n`;
     });
     return md;
