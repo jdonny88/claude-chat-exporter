@@ -202,8 +202,32 @@ function setupClaudeExporter() {
     return md;
   }
 
-  function buildMarkdown(data) {
+  // The conversation is a tree: editing a prompt or regenerating a reply
+  // creates branches, and chat_messages (with tree=true) contains ALL of them.
+  // The thread that actually steers the conversation is the path from the
+  // active leaf (current_leaf_message_uuid) up to the root. Walk parents and
+  // reverse to get just that thread in order, dropping abandoned branches.
+  function linearizeActiveBranch(data) {
     const messages = data?.chat_messages || [];
+    const byUuid = new Map();
+    for (const m of messages) byUuid.set(m.uuid, m);
+
+    const chain = [];
+    const guard = new Set(); // cycle protection
+    let cur = data?.current_leaf_message_uuid;
+    while (cur && byUuid.has(cur) && !guard.has(cur)) {
+      guard.add(cur);
+      chain.push(byUuid.get(cur));
+      cur = byUuid.get(cur).parent_message_uuid;
+    }
+    chain.reverse();
+
+    // Fallback to raw order if the leaf/parent fields aren't resolvable.
+    return chain.length ? chain : messages;
+  }
+
+  function buildMarkdown(data) {
+    const messages = linearizeActiveBranch(data);
 
     // Collect the renderable messages first so we can number them and group
     // them into exchanges.

@@ -125,6 +125,7 @@ This repo also ships [`chatgpt-chat-exporter.js`](./chatgpt-chat-exporter.js), w
 ## Limitations
 
 - **Claude Web Only** - Works on the claude.ai web interface (uses your logged-in session)
+- **Active branch only** - Editing a prompt or regenerating a reply creates branches; only the surviving thread (from the active leaf up to the root) is exported, so edited-away versions don't inflate the counts
 - **Text content** - Thinking blocks and tool results are skipped; message text is exported
 - **Artifacts / files** - Outputs (artifacts, created/presented files) are listed with `_[Artifact: filename | Title]_` markers grouped at the end of the response (as in the UI), but their content is not embedded
 - **Attachments** - Uploaded images are shown as `_[image]_` placeholders, not embedded
