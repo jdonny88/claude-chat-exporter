@@ -61,7 +61,7 @@ that follows) and numbered globally, so you can navigate and reference specific
 turns. A horizontal rule separates exchanges.
 
 ```markdown
-# Conversation with Claude
+# Zero trust strategy without strategic focus
 
 ## Exchange 1/12
 

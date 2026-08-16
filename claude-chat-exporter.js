@@ -250,7 +250,8 @@ function setupClaudeExporter() {
       });
     }
 
-    const markdown = renderConversation('# Conversation with Claude\n\n', rendered);
+    const title = data?.name?.trim();
+    const markdown = renderConversation(`# ${title || 'Conversation with Claude'}\n\n`, rendered);
     return { markdown, count: rendered.length };
   }
 
