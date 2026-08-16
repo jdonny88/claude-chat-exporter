@@ -125,7 +125,8 @@ This repo also ships [`chatgpt-chat-exporter.js`](./chatgpt-chat-exporter.js), w
 ## Limitations
 
 - **Claude Web Only** - Works on the claude.ai web interface (uses your logged-in session)
-- **Text content** - Thinking blocks, tool calls, and artifact bodies are skipped; only message text is exported
+- **Text content** - Thinking blocks and tool results are skipped; message text is exported
+- **Artifacts / files** - Outputs (artifacts, created/presented files) are noted with a `_[Artifact: name]_` marker where they occurred, but their content is not embedded
 - **Attachments** - Uploaded images are shown as `_[image]_` placeholders, not embedded
 - **Endpoint churn** - If Claude renames the endpoint or fields, the constants above need updating
 

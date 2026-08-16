@@ -68,17 +68,63 @@ function setupClaudeExporter() {
 
   // --- Reconstruct the transcript from the message list --------------------
 
-  // Join the text of a message's content blocks. Text blocks carry `.text`
-  // (the raw Markdown Claude produced / the user typed); thinking, tool_use,
-  // tool_result and artifact blocks have no `.text` and are skipped, which
-  // matches the exporter's long-standing behavior.
+  // Render a message from its content blocks: text blocks carry the raw
+  // Markdown Claude produced / the user typed; output tool calls (artifacts,
+  // file creation) become a marker; thinking and tool-result blocks are
+  // skipped. See extractText below.
+  function basename(path) {
+    return String(path || '').split('/').pop() || '';
+  }
+
+  // Markers for output-producing tool calls, so the transcript records that a
+  // response created/updated an artifact or file even though we don't embed
+  // its content. Returns {key, text} entries (key is used to dedupe, e.g. a
+  // create_file + present_files pair for the same file → one marker).
+  function artifactMarkers(block) {
+    const name = block.name;
+    const input = block.input || {};
+    const out = [];
+
+    if (name === 'artifacts') {
+      // Classic side-panel artifacts (documents, code, React, etc.).
+      const title = input.title || input.id || 'artifact';
+      const type = input.type ? ` (${input.type})` : '';
+      out.push({ key: `a:${title}`, text: `_[Artifact: "${title}"${type}]_` });
+    } else if (name === 'create_file' || name === 'update_file' || name === 'str_replace_file') {
+      const base = basename(input.path || input.filename);
+      if (base) out.push({ key: `f:${base}`, text: `_[Artifact: ${base}]_` });
+    } else if (name === 'present_files') {
+      for (const p of (input.filepaths || [])) {
+        const base = basename(p);
+        if (base) out.push({ key: `f:${base}`, text: `_[Artifact: ${base}]_` });
+      }
+    }
+
+    return out;
+  }
+
+  // Build a message body from its content blocks, in order: include text
+  // blocks and drop an artifact marker wherever an output tool was used.
+  // Non-output tool calls, tool results, and thinking blocks are skipped.
   function extractText(msg) {
     if (!Array.isArray(msg.content)) return '';
-    return msg.content
-      .map(block => (typeof block.text === 'string' ? block.text : ''))
-      .filter(Boolean)
-      .join('\n\n')
-      .trim();
+
+    const parts = [];
+    const seen = new Set();
+
+    for (const block of msg.content) {
+      if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+        parts.push(block.text.trim());
+      } else if (block.type === 'tool_use') {
+        for (const marker of artifactMarkers(block)) {
+          if (seen.has(marker.key)) continue;
+          seen.add(marker.key);
+          parts.push(marker.text);
+        }
+      }
+    }
+
+    return parts.join('\n\n').trim();
   }
 
   // Claude's data doesn't return image bytes inline the way ChatGPT's does, so
