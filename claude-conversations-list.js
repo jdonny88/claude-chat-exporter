@@ -105,8 +105,10 @@ function listClaudeConversations() {
 
       if (items.length === 0) throw new Error('No conversations returned.');
 
-      // Sort most-recently-updated first for readability.
-      items.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+      // Oldest first (by creation), so the numbering grows from 1 = oldest and
+      // stays stable across runs: new conversations append as the next number
+      // instead of shifting every existing row.
+      items.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
 
       // Two files: the compact table, and the full summaries.
       download(buildTable(items), 'claude-conversations.md', 'text/markdown');
