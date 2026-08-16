@@ -76,14 +76,28 @@ function setupClaudeExporter() {
     return String(path || '').split('/').pop() || '';
   }
 
+  // Derive the display title Claude's UI shows for a file: drop the extension,
+  // turn separators into spaces, and sentence-case it.
+  // "critique-and-evaluation-sherpa-note.md" -> "Critique and evaluation sherpa note"
+  function prettyTitle(filename) {
+    const words = basename(filename).replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').trim();
+    return words ? words.charAt(0).toUpperCase() + words.slice(1) : '';
+  }
+
   // Markers for output-producing tool calls, so the transcript records that a
   // response created/updated an artifact or file even though we don't embed
   // its content. Returns {key, text} entries (key is used to dedupe, e.g. a
-  // create_file + present_files pair for the same file → one marker).
+  // create_file + present_files pair for the same file → one marker). File
+  // markers carry both the filename and the derived title: "name.md | Title".
   function artifactMarkers(block) {
     const name = block.name;
     const input = block.input || {};
     const out = [];
+
+    const fileMarker = (base) => ({
+      key: `f:${base}`,
+      text: `_[Artifact: ${base} | ${prettyTitle(base)}]_`
+    });
 
     if (name === 'artifacts') {
       // Classic side-panel artifacts (documents, code, React, etc.).
@@ -92,39 +106,41 @@ function setupClaudeExporter() {
       out.push({ key: `a:${title}`, text: `_[Artifact: "${title}"${type}]_` });
     } else if (name === 'create_file' || name === 'update_file' || name === 'str_replace_file') {
       const base = basename(input.path || input.filename);
-      if (base) out.push({ key: `f:${base}`, text: `_[Artifact: ${base}]_` });
+      if (base) out.push(fileMarker(base));
     } else if (name === 'present_files') {
       for (const p of (input.filepaths || [])) {
         const base = basename(p);
-        if (base) out.push({ key: `f:${base}`, text: `_[Artifact: ${base}]_` });
+        if (base) out.push(fileMarker(base));
       }
     }
 
     return out;
   }
 
-  // Build a message body from its content blocks, in order: include text
-  // blocks and drop an artifact marker wherever an output tool was used.
-  // Non-output tool calls, tool results, and thinking blocks are skipped.
+  // Build a message body from its content blocks: keep text blocks in order,
+  // and collect artifact markers to append at the END of the message (mirroring
+  // the UI, where produced files appear grouped below the response). Non-output
+  // tool calls, tool results, and thinking blocks are skipped.
   function extractText(msg) {
     if (!Array.isArray(msg.content)) return '';
 
-    const parts = [];
+    const textParts = [];
+    const markers = [];
     const seen = new Set();
 
     for (const block of msg.content) {
       if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-        parts.push(block.text.trim());
+        textParts.push(block.text.trim());
       } else if (block.type === 'tool_use') {
         for (const marker of artifactMarkers(block)) {
           if (seen.has(marker.key)) continue;
           seen.add(marker.key);
-          parts.push(marker.text);
+          markers.push(marker.text);
         }
       }
     }
 
-    return parts.join('\n\n').trim();
+    return [...textParts, ...markers].join('\n\n').trim();
   }
 
   // Claude's data doesn't return image bytes inline the way ChatGPT's does, so
