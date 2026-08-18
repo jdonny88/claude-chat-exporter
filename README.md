@@ -133,9 +133,17 @@ This repo also ships [`chatgpt-chat-exporter.js`](./chatgpt-chat-exporter.js), w
 
 ## Privacy & Security
 
-- **Local Processing** - Everything runs in your browser
-- **Same-Origin Only** - Requests go only to Claude's own backend using your existing session; no third-party services
-- **No Data Storage** - The conversation is fetched, converted, and downloaded immediately
+What these scripts guarantee:
+
+- **Local processing** - Everything runs in your browser; the conversation is fetched, converted, and downloaded immediately with no external processing.
+- **Same-origin only** - Every request is a relative path back to claude.ai's own backend, using your existing session cookies. Nothing is ever sent to a third-party server.
+- **No secrets in output** - Your session credentials are never written into the downloaded `.md` files, `localStorage`, or anywhere persistent — the files contain conversation content only.
+
+The real thing to be careful about is **not this code, but the habit of pasting code into the browser console** (sometimes called "Self-XSS"):
+
+- **Only run this from a source you trust.** Copy it from your own copy of this repo, not from a link someone sends you.
+- **Never paste console snippets other people give you** into a logged-in claude.ai (or any) tab — a malicious script pasted there could read your session and send it elsewhere. That's the actual attack vector, and it applies to any console tool, not just this one.
+- **Skim before you paste** — the scripts are short. The safety check: every `fetch(...)` targets a relative `/api/...` path on the current site. If you ever see a fetch to some other domain, don't run it.
 
 ## License
 

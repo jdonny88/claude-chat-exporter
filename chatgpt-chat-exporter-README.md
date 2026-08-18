@@ -142,9 +142,17 @@ their messages.
 
 ## Privacy & Security
 
-- **Local Processing** - Everything runs in your browser
-- **Same-Origin Only** - Requests go only to ChatGPT's own backend using your existing session; no third-party services
-- **No Data Storage** - The conversation is fetched, converted, and downloaded immediately
+What these scripts guarantee:
+
+- **Local processing** - Everything runs in your browser; the conversation is fetched, converted, and downloaded immediately with no external processing.
+- **Same-origin only** - Every request is a relative path back to chatgpt.com's own backend. The session token (read from `/api/auth/session`) is used **only** as a `Bearer` header to ChatGPT's own `/backend-api/...` endpoints — it is never sent to a third-party server.
+- **Transient credentials, no secrets in output** - The token lives in a local variable for the few seconds the script runs and is then discarded (never stored in `localStorage` or anywhere persistent). It is never written into the downloaded `.md` files — those contain conversation content only.
+
+The real thing to be careful about is **not this code, but the habit of pasting code into the browser console** (sometimes called "Self-XSS"):
+
+- **Only run this from a source you trust.** Copy it from your own copy of this repo, not from a link someone sends you.
+- **Never paste console snippets other people give you** into a logged-in chatgpt.com (or any) tab — a malicious script pasted there could read your session token and send it elsewhere. That's the actual attack vector, and it applies to any console tool, not just this one.
+- **Skim before you paste** — the scripts are short. The safety check: the token only ever appears in a `fetch('/backend-api/...')` header on the current site. If you ever see it (or any request) going to some other domain, don't run it.
 
 ## Disclaimer
 
