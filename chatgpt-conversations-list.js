@@ -137,6 +137,11 @@ function listChatGPTConversations() {
 
       if (items.length === 0) throw new Error('No conversations returned.');
 
+      // Oldest first (by creation), so the numbering grows from 1 = oldest and
+      // stays stable across runs: new conversations append as the next number
+      // instead of shifting every existing row. (The API pages newest-first.)
+      items.sort((a, b) => new Date(a.create_time || 0) - new Date(b.create_time || 0));
+
       const md = buildMarkdown(items);
       download(md, 'chatgpt-conversations.md', 'text/markdown');
 
