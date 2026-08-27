@@ -139,14 +139,60 @@ function setupChatGPTExporter() {
   }
 
   // Whether a message node should appear in the exported transcript.
+  function hasImagePart(message) {
+    return (message?.content?.parts || [])
+      .some(p => p && typeof p === 'object' && p.content_type === 'image_asset_pointer');
+  }
+
   function isVisibleMessage(message) {
     if (!message) return false;
-    const role = message.author?.role;
-    if (role !== 'user' && role !== 'assistant') return false; // drop system/tool
     if (message.metadata?.is_visually_hidden_from_conversation) return false;
+    const role = message.author?.role;
+    if (role === 'user') return true;
     // Assistant messages addressed to a tool (function calls) aren't shown.
-    if (role === 'assistant' && message.recipient && message.recipient !== 'all') return false;
-    return true;
+    if (role === 'assistant') return !(message.recipient && message.recipient !== 'all');
+    // Tool messages are noise (search, browsing) EXCEPT generated images.
+    if (role === 'tool') return hasImagePart(message);
+    return false; // system, etc.
+  }
+
+  // Markers for files attached to a message. Uploads live in
+  // metadata.attachments; image uploads are skipped here because they already
+  // come through the image_asset_pointer path (avoiding a double marker).
+  function attachmentMarkers(message) {
+    const markers = [];
+    for (const a of (message?.metadata?.attachments || [])) {
+      const mime = String(a?.mime_type || '').toLowerCase();
+      if (mime.startsWith('image/')) continue;
+      markers.push(`_[file: ${a?.name || 'file'}]_`);
+    }
+    return markers;
+  }
+
+  // ChatGPT embeds rich-content directives in the text as tokens delimited by
+  // private-use characters: U+E200 <type> U+E202 <payload…> U+E201. In the app
+  // these render as citation chips, image carousels, product cards; in raw text
+  // they're noise. Strip citations, mark image groups and products.
+  function cleanTokens(text) {
+    if (!text) return text;
+    // Capture an optional preceding space so stripping a mid-line citation
+    // doesn't leave a double space; markers keep the space.
+    let out = text.replace(/( ?)\uE200([^\uE201]*)\uE201/g, (_, sp, inner) => {
+      const segs = inner.split('\uE202');
+      const type = segs[0] || '';
+      if (type === 'image_group') return sp + '_[Images]_';
+      if (type === 'product') {
+        let name = '';
+        try {
+          name = (JSON.parse(segs[1]) || []).find(x => typeof x === 'string' && !/^turn\d/.test(x)) || '';
+        } catch (e) { /* ignore */ }
+        return sp + (name ? `_[Product: ${name}]_` : '_[Product]_');
+      }
+      return ''; // cite / filecite / unknown directives (drop the space too)
+    });
+    out = out.replace(/[\uE200-\uE206]/g, '');           // sweep stray delimiters
+    out = out.replace(/ +\n/g, '\n').replace(/\n{3,}/g, '\n\n'); // tidy whitespace
+    return out;
   }
 
   // Turn a message's content object into Markdown text.
@@ -159,7 +205,7 @@ function setupChatGPTExporter() {
     if (type === 'thoughts' || type === 'reasoning_recap') return '';
 
     if (type === 'text') {
-      return (c.parts || []).filter(p => typeof p === 'string').join('\n\n').trim();
+      return cleanTokens((c.parts || []).filter(p => typeof p === 'string').join('\n\n').trim());
     }
 
     if (type === 'code') {
@@ -168,19 +214,24 @@ function setupChatGPTExporter() {
     }
 
     if (type === 'multimodal_text') {
-      return (c.parts || []).map(p => {
+      const s = (c.parts || []).map(p => {
         if (typeof p === 'string') return p;
-        if (p && p.content_type === 'image_asset_pointer') return '_[image]_';
+        if (p && p.content_type === 'image_asset_pointer') {
+          // A dalle/generation metadata block marks an AI-produced image.
+          const generated = p.metadata?.dalle || p.metadata?.generation;
+          return generated ? '_[Generated image]_' : '_[image]_';
+        }
         if (p && p.content_type === 'audio_transcription' && p.text) return p.text;
         return '';
       }).filter(Boolean).join('\n\n').trim();
+      return cleanTokens(s);
     }
 
     // Reasonable fallbacks for less common content types.
     if (Array.isArray(c.parts)) {
-      return c.parts.filter(p => typeof p === 'string').join('\n\n').trim();
+      return cleanTokens(c.parts.filter(p => typeof p === 'string').join('\n\n').trim());
     }
-    if (typeof c.text === 'string') return c.text.trim();
+    if (typeof c.text === 'string') return cleanTokens(c.text.trim());
     return '';
   }
 
@@ -221,12 +272,15 @@ function setupChatGPTExporter() {
       const message = node.message;
       if (!isVisibleMessage(message)) continue;
       const content = extractContent(message);
-      if (!content) continue;
+      const files = attachmentMarkers(message);
+      // Attachment markers first (they appear above the message in the UI).
+      const body = [files.join('\n'), content].filter(Boolean).join('\n\n');
+      if (!body) continue;
       rendered.push({
-        role: message.author.role, // 'user' | 'assistant'
+        role: message.author.role, // 'user' | 'assistant' | 'tool' (generated image)
         who: message.author.role === 'user' ? 'You' : 'ChatGPT',
         ts: formatTimestamp(message.create_time),
-        content
+        content: body
       });
     }
 
