@@ -143,16 +143,17 @@ function setupClaudeExporter() {
     return [...textParts, ...markers].join('\n\n').trim();
   }
 
-  // Claude's data doesn't return image bytes inline the way ChatGPT's does, so
-  // we emit a placeholder for anything image-like. Uploads can appear either as
-  // `image` content blocks or (more commonly on claude.ai) in message-level
-  // file arrays, so check both. Best-effort across the likely field names.
-  function extractImagePlaceholders(msg) {
-    const placeholders = [];
+  // Claude doesn't return file bytes inline, so we emit a placeholder for each
+  // attachment. Uploads appear as `image` content blocks or (more commonly on
+  // claude.ai) in message-level file arrays. Image-like files get an image
+  // marker; everything else (file_kind "blob", PDFs, docs, ...) gets a file
+  // marker naming it.
+  function extractAttachmentMarkers(msg) {
+    const markers = [];
 
     if (Array.isArray(msg.content)) {
       for (const block of msg.content) {
-        if (block && block.type === 'image') placeholders.push('_[image]_');
+        if (block && block.type === 'image') markers.push('_[image]_');
       }
     }
 
@@ -162,11 +163,12 @@ function setupClaudeExporter() {
         const name = f?.file_name || f?.name || '';
         const kind = String(f?.file_kind || f?.type || f?.file_type || '').toLowerCase();
         const looksImage = kind.includes('image') || /\.(png|jpe?g|gif|webp|bmp|svg|heic)$/i.test(name);
-        if (looksImage) placeholders.push(name ? `_[image: ${name}]_` : '_[image]_');
+        if (looksImage) markers.push(name ? `_[image: ${name}]_` : '_[image]_');
+        else markers.push(name ? `_[file: ${name}]_` : '_[file]_');
       }
     }
 
-    return placeholders;
+    return markers;
   }
 
   function getConversationTitle(data) {
@@ -237,9 +239,9 @@ function setupClaudeExporter() {
       if (sender !== 'human' && sender !== 'assistant') continue;
 
       const text = extractText(msg);
-      const images = extractImagePlaceholders(msg);
-      // Image placeholders first (they're attached above the message text).
-      const body = [images.join('\n'), text].filter(Boolean).join('\n\n');
+      const attachments = extractAttachmentMarkers(msg);
+      // Attachment markers first (they're attached above the message text).
+      const body = [attachments.join('\n'), text].filter(Boolean).join('\n\n');
       if (!body) continue;
 
       rendered.push({

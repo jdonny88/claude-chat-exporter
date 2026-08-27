@@ -137,7 +137,8 @@ their messages.
 
 - **ChatGPT Web Only** - Works on the chatgpt.com web interface (uses your logged-in session)
 - **Active branch only** - Exports the currently-visible thread; alternate branches from edits/regenerations aren't included (the full tree is available if you want to add this later)
-- **Attachments** - Images and uploaded files are shown as `_[image]_` placeholders, not embedded
+- **Attachments** - Uploaded files are shown as placeholders, not embedded: `_[image]_` for images and `_[file: name]_` for other files
+- **Generated images** - Images ChatGPT generates are marked `_[Generated image]_` (the image itself is not embedded)
 - **Endpoint churn** - If OpenAI renames the backend endpoints, the constants above need updating
 
 ## Privacy & Security
