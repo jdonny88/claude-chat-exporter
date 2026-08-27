@@ -84,63 +84,67 @@ function setupClaudeExporter() {
     return words ? words.charAt(0).toUpperCase() + words.slice(1) : '';
   }
 
-  // Markers for output-producing tool calls, so the transcript records that a
-  // response created/updated an artifact or file even though we don't embed
-  // its content. Returns {key, text} entries (key is used to dedupe, e.g. a
-  // create_file + present_files pair for the same file → one marker). File
-  // markers carry both the filename and the derived title: "name.md | Title".
-  function artifactMarkers(block) {
-    const name = block.name;
-    const input = block.input || {};
-    const out = [];
+  function fileMarker(base) {
+    return { key: `f:${base}`, text: `_[Artifact: ${base} | ${prettyTitle(base)}]_` };
+  }
 
-    const fileMarker = (base) => ({
-      key: `f:${base}`,
-      text: `_[Artifact: ${base} | ${prettyTitle(base)}]_`
-    });
+  // Collect artifact markers for a message, mirroring what the UI surfaces.
+  // PRESENTED files are the source of truth: a message can create intermediate
+  // files (e.g. create v2, rename, present the final one) and only the presented
+  // file is shown. So if the message presents files, mark only those; fall back
+  // to created/updated files only when nothing was presented. Classic
+  // side-panel artifacts are always included. Deduped by filename/title.
+  function collectArtifactMarkers(msg) {
+    const artifacts = [];  // classic `artifacts` tool
+    const presented = [];  // present_files
+    const created = [];    // create_file / update_file
 
-    if (name === 'artifacts') {
-      // Classic side-panel artifacts (documents, code, React, etc.).
-      const title = input.title || input.id || 'artifact';
-      const type = input.type ? ` (${input.type})` : '';
-      out.push({ key: `a:${title}`, text: `_[Artifact: "${title}"${type}]_` });
-    } else if (name === 'create_file' || name === 'update_file' || name === 'str_replace_file') {
-      const base = basename(input.path || input.filename);
-      if (base) out.push(fileMarker(base));
-    } else if (name === 'present_files') {
-      for (const p of (input.filepaths || [])) {
-        const base = basename(p);
-        if (base) out.push(fileMarker(base));
+    for (const block of (msg.content || [])) {
+      if (block.type !== 'tool_use') continue;
+      const name = block.name;
+      const input = block.input || {};
+
+      if (name === 'artifacts') {
+        const title = input.title || input.id || 'artifact';
+        const type = input.type ? ` (${input.type})` : '';
+        artifacts.push({ key: `a:${title}`, text: `_[Artifact: "${title}"${type}]_` });
+      } else if (name === 'present_files') {
+        for (const p of (input.filepaths || [])) {
+          const base = basename(p);
+          if (base) presented.push(fileMarker(base));
+        }
+      } else if (name === 'create_file' || name === 'update_file' || name === 'str_replace_file') {
+        const base = basename(input.path || input.filename);
+        if (base) created.push(fileMarker(base));
       }
     }
 
+    const files = presented.length ? presented : created;
+    const out = [];
+    const seen = new Set();
+    for (const m of [...artifacts, ...files]) {
+      if (seen.has(m.key)) continue;
+      seen.add(m.key);
+      out.push(m.text);
+    }
     return out;
   }
 
   // Build a message body from its content blocks: keep text blocks in order,
-  // and collect artifact markers to append at the END of the message (mirroring
-  // the UI, where produced files appear grouped below the response). Non-output
-  // tool calls, tool results, and thinking blocks are skipped.
+  // then append artifact markers at the END (mirroring the UI, where produced
+  // files appear grouped below the response). Tool results and thinking blocks
+  // are skipped.
   function extractText(msg) {
     if (!Array.isArray(msg.content)) return '';
 
     const textParts = [];
-    const markers = [];
-    const seen = new Set();
-
     for (const block of msg.content) {
       if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
         textParts.push(block.text.trim());
-      } else if (block.type === 'tool_use') {
-        for (const marker of artifactMarkers(block)) {
-          if (seen.has(marker.key)) continue;
-          seen.add(marker.key);
-          markers.push(marker.text);
-        }
       }
     }
 
-    return [...textParts, ...markers].join('\n\n').trim();
+    return [...textParts, ...collectArtifactMarkers(msg)].join('\n\n').trim();
   }
 
   // Claude doesn't return file bytes inline, so we emit a placeholder for each
