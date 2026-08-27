@@ -169,6 +169,30 @@ function setupChatGPTExporter() {
     return markers;
   }
 
+  // ChatGPT embeds rich-content directives in the text as tokens delimited by
+  // private-use characters: U+E200 <type> U+E202 <payload…> U+E201. In the app
+  // these render as citation chips, image carousels, product cards; in raw text
+  // they're noise. Strip citations, mark image groups and products.
+  function cleanTokens(text) {
+    if (!text) return text;
+    let out = text.replace(/\uE200([^\uE201]*)\uE201/g, (_, inner) => {
+      const segs = inner.split('\uE202');
+      const type = segs[0] || '';
+      if (type === 'image_group') return '_[Images]_';
+      if (type === 'product') {
+        let name = '';
+        try {
+          name = (JSON.parse(segs[1]) || []).find(x => typeof x === 'string' && !/^turn\d/.test(x)) || '';
+        } catch (e) { /* ignore */ }
+        return name ? `_[Product: ${name}]_` : '_[Product]_';
+      }
+      return ''; // cite / filecite / unknown directives
+    });
+    out = out.replace(/[\uE200-\uE206]/g, '');           // sweep stray delimiters
+    out = out.replace(/ +\n/g, '\n').replace(/\n{3,}/g, '\n\n'); // tidy whitespace
+    return out;
+  }
+
   // Turn a message's content object into Markdown text.
   function extractContent(message) {
     const c = message.content;
@@ -179,7 +203,7 @@ function setupChatGPTExporter() {
     if (type === 'thoughts' || type === 'reasoning_recap') return '';
 
     if (type === 'text') {
-      return (c.parts || []).filter(p => typeof p === 'string').join('\n\n').trim();
+      return cleanTokens((c.parts || []).filter(p => typeof p === 'string').join('\n\n').trim());
     }
 
     if (type === 'code') {
@@ -188,7 +212,7 @@ function setupChatGPTExporter() {
     }
 
     if (type === 'multimodal_text') {
-      return (c.parts || []).map(p => {
+      const s = (c.parts || []).map(p => {
         if (typeof p === 'string') return p;
         if (p && p.content_type === 'image_asset_pointer') {
           // A dalle/generation metadata block marks an AI-produced image.
@@ -198,13 +222,14 @@ function setupChatGPTExporter() {
         if (p && p.content_type === 'audio_transcription' && p.text) return p.text;
         return '';
       }).filter(Boolean).join('\n\n').trim();
+      return cleanTokens(s);
     }
 
     // Reasonable fallbacks for less common content types.
     if (Array.isArray(c.parts)) {
-      return c.parts.filter(p => typeof p === 'string').join('\n\n').trim();
+      return cleanTokens(c.parts.filter(p => typeof p === 'string').join('\n\n').trim());
     }
-    if (typeof c.text === 'string') return c.text.trim();
+    if (typeof c.text === 'string') return cleanTokens(c.text.trim());
     return '';
   }
 
