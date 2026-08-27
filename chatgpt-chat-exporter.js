@@ -175,18 +175,20 @@ function setupChatGPTExporter() {
   // they're noise. Strip citations, mark image groups and products.
   function cleanTokens(text) {
     if (!text) return text;
-    let out = text.replace(/\uE200([^\uE201]*)\uE201/g, (_, inner) => {
+    // Capture an optional preceding space so stripping a mid-line citation
+    // doesn't leave a double space; markers keep the space.
+    let out = text.replace(/( ?)\uE200([^\uE201]*)\uE201/g, (_, sp, inner) => {
       const segs = inner.split('\uE202');
       const type = segs[0] || '';
-      if (type === 'image_group') return '_[Images]_';
+      if (type === 'image_group') return sp + '_[Images]_';
       if (type === 'product') {
         let name = '';
         try {
           name = (JSON.parse(segs[1]) || []).find(x => typeof x === 'string' && !/^turn\d/.test(x)) || '';
         } catch (e) { /* ignore */ }
-        return name ? `_[Product: ${name}]_` : '_[Product]_';
+        return sp + (name ? `_[Product: ${name}]_` : '_[Product]_');
       }
-      return ''; // cite / filecite / unknown directives
+      return ''; // cite / filecite / unknown directives (drop the space too)
     });
     out = out.replace(/[\uE200-\uE206]/g, '');           // sweep stray delimiters
     out = out.replace(/ +\n/g, '\n').replace(/\n{3,}/g, '\n\n'); // tidy whitespace
