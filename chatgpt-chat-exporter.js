@@ -138,10 +138,18 @@ function setupChatGPTExporter() {
     return nodes;
   }
 
-  // Whether a message node should appear in the exported transcript.
-  function hasImagePart(message) {
-    return (message?.content?.parts || [])
-      .some(p => p && typeof p === 'object' && p.content_type === 'image_asset_pointer');
+  // A generated image carries dalle/generation metadata on its
+  // image_asset_pointer. Figures extracted from an attached file (in an
+  // api_tool file-parse message) are image_asset_pointers too but WITHOUT that
+  // metadata — so this distinguishes a real generated image from file content.
+  function isGeneratedImagePart(p) {
+    return p && typeof p === 'object'
+      && p.content_type === 'image_asset_pointer'
+      && !!(p.metadata?.dalle || p.metadata?.generation);
+  }
+
+  function hasGeneratedImage(message) {
+    return (message?.content?.parts || []).some(isGeneratedImagePart);
   }
 
   function isVisibleMessage(message) {
@@ -151,8 +159,10 @@ function setupChatGPTExporter() {
     if (role === 'user') return true;
     // Assistant messages addressed to a tool (function calls) aren't shown.
     if (role === 'assistant') return !(message.recipient && message.recipient !== 'all');
-    // Tool messages are noise (search, browsing) EXCEPT generated images.
-    if (role === 'tool') return hasImagePart(message);
+    // Tool messages are noise (file parsing, search, browsing) EXCEPT genuine
+    // generated images. Requiring generation metadata excludes file-parse
+    // messages that merely contain figures extracted from an attachment.
+    if (role === 'tool') return hasGeneratedImage(message);
     return false; // system, etc.
   }
 
