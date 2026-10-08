@@ -182,13 +182,28 @@ function setupChatGPTExporter() {
   // Newer ChatGPT responses embed rich UI inside ordinary text as JSX-like
   // component tags (<box>, <row>, <text>, <icon>, <AsyncImageGroup>, <caption>,
   // …). The real content lives inside the tags, so strip the scaffolding and
-  // keep it: image groups become _[Images]_, icons are dropped, everything else
-  // is unwrapped and de-indented. Code blocks are protected, and the pass only
-  // runs on messages that actually use these components — so prose like
-  // List<String> or <https://…> autolinks is never touched.
+  // keep it: image groups become _[Images]_, directional icons become arrow
+  // glyphs (so flow diagrams keep their direction), other icons are dropped,
+  // and everything else is unwrapped and de-indented. Code blocks are
+  // protected, and the pass only runs on messages that actually use these
+  // components — so prose like List<String> or <https://…> autolinks is never
+  // touched.
+
+  // Flow diagrams connect their boxes with directional icons
+  // (<icon name="arrow-down"/>, chevron-right, caret-up, …). Map the direction
+  // to a glyph so the flow survives; non-directional icons return '' (dropped).
+  function iconGlyph(name) {
+    const n = String(name || '').toLowerCase();
+    if (/\bdown\b/.test(n)) return '↓';
+    if (/\bup\b/.test(n)) return '↑';
+    if (/\bright\b/.test(n)) return '→';
+    if (/\bleft\b/.test(n)) return '←';
+    return '';
+  }
+
   function cleanComponents(text) {
     if (!text) return text;
-    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|Entity|(?:Async)?ImageGroup)\b/i.test(text)) return text;
+    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|Entity|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b/i.test(text)) return text;
 
     const code = [];
     let t = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, m => { code.push(m); return `\uE310${code.length - 1}\uE311`; });
@@ -197,11 +212,15 @@ function setupChatGPTExporter() {
       // Inline value components (e.g. <Entity value="Palantir Foundry"/>) keep
       // their label text rather than being dropped with the tag.
       .replace(/<[A-Za-z][\w.-]*\b[^>]*?\bvalue=(?:"([^"]*)"|'([^']*)'|\{`?([^}`]*)`?\})[^>]*?\/>/g, (_, a, b, c) => a ?? b ?? c ?? '')
-      .replace(/<(?:Async)?ImageGroup\b[^>]*>/gi, '_[Images]_')            // image carousels
-      .replace(/<icon\b[^>]*>/gi, '')                                      // icons
+      .replace(/<(?:Async)?ImageGroup\b[^>]*>/gi, '_[Images]_')            // image carousels (plural)
+      .replace(/<(?:Async)?Image\b[^>]*>/gi, '_[Image]_')                  // single images (must follow the Group rule)
+      .replace(/<icon\b[^>]*?\bname=(?:"([^"]*)"|'([^']*)')[^>]*>/gi,
+               (_, a, b) => iconGlyph(a ?? b))                            // directional icons -> glyph
+      .replace(/<icon\b[^>]*>/gi, '')                                      // other icons dropped
       .replace(/<[A-Za-z][\w.-]*\s+[^<>]*?\/?>/g, '')                      // any tag WITH attributes (JSX components)
       .replace(/<\/[A-Za-z][\w.-]*\s*>/g, '')                             // closing tags
       .replace(/<[A-Za-z][\w.-]*\s*\/>/g, '')                            // self-closing, no attrs
+      .replace(/<[A-Za-z][\w]*-[\w-]*\s*>/g, '')                         // bare hyphenated components (e.g. <grid-item>)
       .replace(/<(?:box|row|col|column|grid|stack|card|caption|section|container|spacer|divider|group|list)\b\s*>/gi, ''); // bare structural opens
 
     // De-indent the content that was nested inside components (otherwise 4+
