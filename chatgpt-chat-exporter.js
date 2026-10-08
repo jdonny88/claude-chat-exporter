@@ -179,12 +179,47 @@ function setupChatGPTExporter() {
     return markers;
   }
 
+  // Newer ChatGPT responses embed rich UI inside ordinary text as JSX-like
+  // component tags (<box>, <row>, <text>, <icon>, <AsyncImageGroup>, <caption>,
+  // …). The real content lives inside the tags, so strip the scaffolding and
+  // keep it: image groups become _[Images]_, icons are dropped, everything else
+  // is unwrapped and de-indented. Code blocks are protected, and the pass only
+  // runs on messages that actually use these components — so prose like
+  // List<String> or <https://…> autolinks is never touched.
+  function cleanComponents(text) {
+    if (!text) return text;
+    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|(?:Async)?ImageGroup)\b/i.test(text)) return text;
+
+    const code = [];
+    let t = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, m => { code.push(m); return `\uE310${code.length - 1}\uE311`; });
+
+    t = t
+      .replace(/<(?:Async)?ImageGroup\b[^>]*>/gi, '_[Images]_')            // image carousels
+      .replace(/<icon\b[^>]*>/gi, '')                                      // icons
+      .replace(/<[A-Za-z][\w.-]*\s+[^<>]*?\/?>/g, '')                      // any tag WITH attributes (JSX components)
+      .replace(/<\/[A-Za-z][\w.-]*\s*>/g, '')                             // closing tags
+      .replace(/<[A-Za-z][\w.-]*\s*\/>/g, '')                            // self-closing, no attrs
+      .replace(/<(?:box|row|col|column|grid|stack|card|caption|section|container|spacer|divider|group|list)\b\s*>/gi, ''); // bare structural opens
+
+    // De-indent the content that was nested inside components (otherwise 4+
+    // leading spaces would render as a code block), while keeping list markers.
+    t = t.replace(/^[ \t]+(?=\S)/gm, (ws, offset, str) => {
+      const rest = str.slice(offset + ws.length);
+      return /^([-*+]\s|\d+[.)]\s)/.test(rest) ? ws : '';
+    });
+
+    t = t.replace(/\uE310(\d+)\uE311/g, (_, i) => code[+i]);
+    t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+    return t.trim();
+  }
+
   // ChatGPT embeds rich-content directives in the text as tokens delimited by
   // private-use characters: U+E200 <type> U+E202 <payload…> U+E201. In the app
   // these render as citation chips, image carousels, product cards; in raw text
   // they're noise. Strip citations, mark image groups and products.
   function cleanTokens(text) {
     if (!text) return text;
+    text = cleanComponents(text); // strip rich-UI component tags first
     // Capture an optional preceding space so stripping a mid-line citation
     // doesn't leave a double space; markers keep the space.
     let out = text.replace(/( ?)\uE200([^\uE201]*)\uE201/g, (_, sp, inner) => {
