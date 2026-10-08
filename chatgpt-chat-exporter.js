@@ -188,12 +188,15 @@ function setupChatGPTExporter() {
   // List<String> or <https://…> autolinks is never touched.
   function cleanComponents(text) {
     if (!text) return text;
-    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|(?:Async)?ImageGroup)\b/i.test(text)) return text;
+    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|Entity|(?:Async)?ImageGroup)\b/i.test(text)) return text;
 
     const code = [];
     let t = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, m => { code.push(m); return `\uE310${code.length - 1}\uE311`; });
 
     t = t
+      // Inline value components (e.g. <Entity value="Palantir Foundry"/>) keep
+      // their label text rather than being dropped with the tag.
+      .replace(/<[A-Za-z][\w.-]*\b[^>]*?\bvalue=(?:"([^"]*)"|'([^']*)'|\{`?([^}`]*)`?\})[^>]*?\/>/g, (_, a, b, c) => a ?? b ?? c ?? '')
       .replace(/<(?:Async)?ImageGroup\b[^>]*>/gi, '_[Images]_')            // image carousels
       .replace(/<icon\b[^>]*>/gi, '')                                      // icons
       .replace(/<[A-Za-z][\w.-]*\s+[^<>]*?\/?>/g, '')                      // any tag WITH attributes (JSX components)
