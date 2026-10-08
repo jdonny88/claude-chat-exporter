@@ -140,6 +140,7 @@ their messages.
 - **Attachments** - Uploaded files are shown as placeholders, not embedded: `_[image]_` for images and `_[file: name]_` for other files
 - **Generated images** - Images ChatGPT generates are marked `_[Generated image]_` (the image itself is not embedded)
 - **Rich-content tokens** - ChatGPT's inline web-search citation chips are stripped; image carousels become `_[Images]_` and product cards `_[Product: name]_`
+- **Rich UI components** - Newer responses embed JSX-like layout components (`<box>`, `<row>`, `<text>`, `<icon>`, `<AsyncImageGroup>`, …) inside the message text; these are unwrapped to keep their content (image groups become `_[Images]_`), so the export stays clean Markdown
 - **Endpoint churn** - If OpenAI renames the backend endpoints, the constants above need updating
 
 ## Privacy & Security
