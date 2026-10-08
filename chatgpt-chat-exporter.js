@@ -188,7 +188,7 @@ function setupChatGPTExporter() {
   // List<String> or <https://…> autolinks is never touched.
   function cleanComponents(text) {
     if (!text) return text;
-    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|Entity|(?:Async)?ImageGroup)\b/i.test(text)) return text;
+    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|Entity|(?:Async)?ImageGroup|[a-z][\w]*-[\w-]*)\b/i.test(text)) return text;
 
     const code = [];
     let t = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, m => { code.push(m); return `\uE310${code.length - 1}\uE311`; });
@@ -202,6 +202,7 @@ function setupChatGPTExporter() {
       .replace(/<[A-Za-z][\w.-]*\s+[^<>]*?\/?>/g, '')                      // any tag WITH attributes (JSX components)
       .replace(/<\/[A-Za-z][\w.-]*\s*>/g, '')                             // closing tags
       .replace(/<[A-Za-z][\w.-]*\s*\/>/g, '')                            // self-closing, no attrs
+      .replace(/<[A-Za-z][\w]*-[\w-]*\s*>/g, '')                         // bare hyphenated components (e.g. <grid-item>)
       .replace(/<(?:box|row|col|column|grid|stack|card|caption|section|container|spacer|divider|group|list)\b\s*>/gi, ''); // bare structural opens
 
     // De-indent the content that was nested inside components (otherwise 4+
