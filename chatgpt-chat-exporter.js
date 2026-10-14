@@ -197,6 +197,9 @@ function setupChatGPTExporter() {
   // to a glyph so the flow survives; non-directional icons return '' (dropped).
   function iconGlyph(name) {
     const n = String(name || '').toLowerCase();
+    // Bidirectional / decorative arrows (e.g. arrow-left-right, up-down) aren't
+    // flow connectors, so drop them rather than emit a misleading single arrow.
+    if (/left.*right|right.*left|up.*down|down.*up/.test(n)) return '';
     if (/\bdown\b/.test(n)) return '↓';
     if (/\bup\b/.test(n)) return '↑';
     if (/\bright\b/.test(n)) return '→';
@@ -314,6 +317,29 @@ function setupChatGPTExporter() {
     return t.replace(/\{#each\b[^}]*\}|\{\/each\}|\{#if\b[^}]*\}|\{\/if\}/g, '');
   }
 
+  // Render one grid-item's inner markup into a single table-cell string: run the
+  // same inline transforms the main pass uses, then join the resulting lines
+  // with <br> so a card's title/subtitle/caption stack neatly inside one cell.
+  function renderCell(html) {
+    let s = html
+      .replace(/<[A-Za-z][\w.-]*\b[^>]*?\bvalue=(?:"([^"]*)"|'([^']*)'|\{`?([^}`]*)`?\})[^>]*?\/>/g, (_, a, b, c) => a ?? b ?? c ?? '')
+      .replace(/<(?:Async)?ImageGroup\b[^>]*>/gi, '_[Images]_')
+      .replace(/<(?:Async)?Image\b[^>]*>/gi, '_[Image]_')
+      .replace(/<Cite\b[^>]*>/gi, '')
+      .replace(/<icon\b[^>]*?\bname=(?:"([^"]*)"|'([^']*)')[^>]*>/gi, (_, a, b) => iconGlyph(a ?? b))
+      .replace(/<icon\b[^>]*>/gi, '')
+      .replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi, (_, at, inner) => {
+        const x = inner.trim();
+        if (!x) return '\n';
+        return (/weight\s*=\s*"?(?:medium|semibold|bold)/i.test(at) ? '**' + x + '**' : x) + '\n';
+      })
+      .replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi, (_, inner) => (inner.trim() ? inner.trim() + '\n' : '\n'))
+      .replace(/<badge\b[^>]*>([\s\S]*?)<\/badge>/gi, (_, inner) => (inner.trim() ? '_' + inner.trim() + '_\n' : '\n'))
+      .replace(/<\/?[A-Za-z][\w.-]*(?:\s[^<>]*?)?\/?>/g, '\n');   // strip remaining tags
+    const lines = s.split('\n').map(x => x.trim()).filter(Boolean).map(x => x.replace(/\|/g, '\\|'));
+    return lines.join('<br>');
+  }
+
   function cleanComponents(text) {
     if (!text) return text;
     if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|list|Entity|Cite|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b|\{#(?:each|if)\b/i.test(text)) return text;
@@ -338,6 +364,22 @@ function setupChatGPTExporter() {
       const line = cells => '| ' + cells.concat(Array(ncol - cells.length).fill('')).join(' | ') + ' |';
       const md = [line([]), '| ' + Array(ncol).fill('---').join(' | ') + ' |',
                   ...rows.map(line)].join('\n');
+      blocks.push(md);
+      return `\n\n${blocks.length - 1}\n\n`;
+    });
+
+    // 2b. Convert multi-column <grid> card grids -> Markdown table, so parallel
+    //     cards stay side by side (preserving the "these are siblings" structure
+    //     that a flat vertical list would lose).
+    t = t.replace(/<grid\b([^>]*)>([\s\S]*?)<\/grid>/gi, (m, attrs, body) => {
+      const cm = attrs.match(/columns\s*=\s*(?:"(\d+)"|\{?(\d+)\}?)/i);
+      const cols = cm ? Number(cm[1] || cm[2]) : 2;
+      const items = [...body.matchAll(/<grid-item\b[^>]*>([\s\S]*?)<\/grid-item>/gi)].map(x => renderCell(x[1]));
+      if (items.length < 1 || cols < 2) return m; // leave 1-col grids to normal flow
+      const rows = [];
+      for (let i = 0; i < items.length; i += cols) rows.push(items.slice(i, i + cols));
+      const line = cells => '| ' + cells.concat(Array(cols - cells.length).fill('')).join(' | ') + ' |';
+      const md = [line([]), '| ' + Array(cols).fill('---').join(' | ') + ' |', ...rows.map(line)].join('\n');
       blocks.push(md);
       return `\n\n${blocks.length - 1}\n\n`;
     });
