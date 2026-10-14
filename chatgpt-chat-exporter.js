@@ -179,18 +179,21 @@ function setupChatGPTExporter() {
     return markers;
   }
 
-  // Newer ChatGPT responses embed rich UI inside ordinary text as JSX-like
-  // component tags (<box>, <row>, <text>, <icon>, <AsyncImageGroup>, <caption>,
-  // …). The real content lives inside the tags, so strip the scaffolding and
-  // keep it: image groups become _[Images]_, directional icons become arrow
-  // glyphs (so flow diagrams keep their direction), other icons are dropped,
-  // and everything else is unwrapped and de-indented. Code blocks are
-  // protected, and the pass only runs on messages that actually use these
-  // components — so prose like List<String> or <https://…> autolinks is never
+  // Newer ChatGPT responses embed rich UI inside ordinary text as a small
+  // JSX + Handlebars-style language: layout tags (<box>, <row>, <grid>,
+  // <grid-item>, <text>, <caption>, <badge>, <divider>, ...), <table>s, <list>s,
+  // and {#each}/{#if} template loops over inline data. The real content lives
+  // inside all of this, so we expand the templates, turn tables and lists into
+  // Markdown, keep each label/value on its own line (image groups -> _[Images]_,
+  // single images -> _[Image]_, directional icons -> arrow glyphs so flow
+  // diagrams keep their direction, other icons dropped) and unwrap the rest.
+  // Code blocks and generated tables/lists are protected from the whitespace
+  // tidy-up, and the pass only runs on messages that actually use these
+  // constructs - so prose like List<String> or <https://...> autolinks is never
   // touched.
 
   // Flow diagrams connect their boxes with directional icons
-  // (<icon name="arrow-down"/>, chevron-right, caret-up, …). Map the direction
+  // (<icon name="arrow-down"/>, chevron-right, caret-up, ...). Map the direction
   // to a glyph so the flow survives; non-directional icons return '' (dropped).
   function iconGlyph(name) {
     const n = String(name || '').toLowerCase();
@@ -201,42 +204,220 @@ function setupChatGPTExporter() {
     return '';
   }
 
+  // Parse the (non-strict) array literal used by {#each ...}. Supports an array
+  // of objects with unquoted keys ([{name:"a",sub:"b"}, ...]) and an array of
+  // string arrays ([["1","a","b"], ...]). Returns an array, or null if not an
+  // array literal.
+  function parseArrayLiteral(src) {
+    let s = String(src || '').trim();
+    if (s[0] !== '[') return null;
+    const inner = s.slice(1, s.lastIndexOf(']'));
+    const elements = [];
+    let depth = 0, quote = '', buf = '', started = false;
+    for (let i = 0; i < inner.length; i++) {
+      const ch = inner[i];
+      if (quote) {
+        buf += ch;
+        if (ch === quote && inner[i - 1] !== '\\') quote = '';
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; buf += ch; started = true; continue; }
+      if (ch === '{' || ch === '[') { depth++; buf += ch; started = true; continue; }
+      if (ch === '}' || ch === ']') { depth--; buf += ch; continue; }
+      if (ch === ',' && depth === 0) {
+        if (started) elements.push(buf.trim());
+        buf = ''; started = false; continue;
+      }
+      if (!/\s/.test(ch)) started = true;
+      buf += ch;
+    }
+    if (buf.trim()) elements.push(buf.trim());
+
+    return elements.map(el => {
+      el = el.trim();
+      if (el[0] === '{') {
+        const obj = {};
+        const re = /(["']?)([A-Za-z_]\w*)\1\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g;
+        let m;
+        while ((m = re.exec(el))) obj[m[2]] = m[3].slice(1, -1);
+        return obj;
+      }
+      if (el[0] === '[') {
+        const arr = [];
+        const re = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g;
+        let m;
+        while ((m = re.exec(el))) arr.push(m[1] ?? m[2] ?? '');
+        return arr;
+      }
+      const q = el.match(/^["'](.*)["']$/);
+      return q ? q[1] : el;
+    });
+  }
+
+  // Evaluate a simple {#if} condition such as "i<4". Only index/number
+  // comparisons are supported; anything else keeps the block (returns true).
+  function evalCond(expr, scope) {
+    const m = String(expr || '').match(/^\s*(\w+)\s*(<=|>=|==|!=|<|>)\s*(\d+)\s*$/);
+    if (!m) return true;
+    const left = scope[m[1]];
+    if (typeof left !== 'number') return true;
+    const right = Number(m[3]);
+    switch (m[2]) {
+      case '<': return left < right;
+      case '>': return left > right;
+      case '<=': return left <= right;
+      case '>=': return left >= right;
+      case '==': return left == right;
+      case '!=': return left != right;
+    }
+    return true;
+  }
+
+  // Render one {#each} body for a single element: resolve {#if}, then substitute
+  // {var.key}, {var[n]}, {var} and the optional index variable.
+  function renderEachBody(body, itemVar, el, idxVar, idx) {
+    let out = body;
+    const scope = { [itemVar]: el };
+    if (idxVar) scope[idxVar] = idx;
+    out = out.replace(/\{#if\s+([^}]*)\}([\s\S]*?)\{\/if\}/g,
+      (_, cond, inner) => (evalCond(cond, scope) ? inner : ''));
+
+    const V = itemVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp('\\{\\s*' + V + '\\s*\\.\\s*(\\w+)\\s*\\}', 'g'),
+      (_, k) => (el && el[k] != null ? el[k] : ''));
+    out = out.replace(new RegExp('\\{\\s*' + V + '\\s*\\[\\s*(\\d+)\\s*\\]\\s*\\}', 'g'),
+      (_, i) => (el && el[+i] != null ? el[+i] : ''));
+    out = out.replace(new RegExp('\\{\\s*' + V + '\\s*\\}', 'g'),
+      () => (typeof el === 'string' ? el : ''));
+    if (idxVar) {
+      const I = idxVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp('\\{\\s*' + I + '\\s*\\}', 'g'), () => String(idx));
+    }
+    return out;
+  }
+
+  // Expand {#each ARRAY as var[,idx]} ... {/each} loops over their inline data.
+  function expandTemplates(text) {
+    let t = text, prev, guard = 0;
+    do {
+      prev = t;
+      t = t.replace(
+        /\{#each\s+([\s\S]*?)\s+as\s+(\w+)(?:\s*,\s*(\w+))?\s*\}([\s\S]*?)\{\/each\}/g,
+        (m, arrLit, itemVar, idxVar, body) => {
+          const items = parseArrayLiteral(arrLit);
+          if (!items) return m;
+          return items.map((el, i) => renderEachBody(body, itemVar, el, idxVar, i)).join('\n');
+        });
+      guard++;
+    } while (t !== prev && guard < 10);
+    // Safety net: drop residual control tokens if a loop failed to parse.
+    return t.replace(/\{#each\b[^}]*\}|\{\/each\}|\{#if\b[^}]*\}|\{\/if\}/g, '');
+  }
+
   function cleanComponents(text) {
     if (!text) return text;
-    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|Entity|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b/i.test(text)) return text;
+    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|list|Entity|Cite|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b|\{#(?:each|if)\b/i.test(text)) return text;
 
+    // Protect code spans/blocks and (later) generated tables/lists from the
+    // whitespace normalisation that follows.
     const code = [];
-    let t = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, m => { code.push(m); return `\uE310${code.length - 1}\uE311`; });
+    const blocks = [];
+    let t = text.replace(/```[\s\S]*?```|`[^`\n]+`/g,
+      m => { code.push(m); return `${code.length - 1}`; });
 
+    // 1. Expand {#each}/{#if} templates into concrete markup.
+    t = expandTemplates(t);
+
+    // 2. Convert <table> -> GitHub-flavoured Markdown table (protected block).
+    t = t.replace(/<table\b[^>]*>([\s\S]*?)<\/table>/gi, (_, body) => {
+      const rows = [...body.matchAll(/<table-row\b[^>]*>([\s\S]*?)<\/table-row>/gi)].map(r =>
+        [...r[1].matchAll(/<table-cell\b[^>]*>([\s\S]*?)<\/table-cell>/gi)]
+          .map(c => c[1].replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|')));
+      if (!rows.length) return '';
+      const ncol = Math.max(...rows.map(r => r.length));
+      const line = cells => '| ' + cells.concat(Array(ncol - cells.length).fill('')).join(' | ') + ' |';
+      const md = [line([]), '| ' + Array(ncol).fill('---').join(' | ') + ' |',
+                  ...rows.map(line)].join('\n');
+      blocks.push(md);
+      return `\n\n${blocks.length - 1}\n\n`;
+    });
+
+    // 3. Convert <list> -> Markdown list (protected block).
+    t = t.replace(/<list\b([^>]*)>([\s\S]*?)<\/list>/gi, (_, attrs, body) => {
+      const numbered = /marker\s*=\s*"?number/i.test(attrs);
+      const items = [...body.matchAll(/<list-item\b[^>]*>([\s\S]*?)<\/list-item>/gi)].map(x => x[1]);
+      if (!items.length) return '';
+      let n = 0;
+      const md = items.map(it => {
+        n++;
+        const marker = numbered ? `${n}. ` : '- ';
+        const indent = ' '.repeat(marker.length);
+        const lines = it.replace(/^\s*\n|\s+$/g, '').split('\n');
+        return lines.map((ln, i) => {
+          const s = ln.trim();
+          if (i === 0) return marker + s;
+          return s ? indent + s : '';
+        }).join('\n');
+      }).join('\n\n');
+      blocks.push(md);
+      return `\n\n${blocks.length - 1}\n\n`;
+    });
+
+    // 4. Inline/semantic components.
     t = t
       // Inline value components (e.g. <Entity value="Palantir Foundry"/>) keep
       // their label text rather than being dropped with the tag.
       .replace(/<[A-Za-z][\w.-]*\b[^>]*?\bvalue=(?:"([^"]*)"|'([^']*)'|\{`?([^}`]*)`?\})[^>]*?\/>/g, (_, a, b, c) => a ?? b ?? c ?? '')
       .replace(/<(?:Async)?ImageGroup\b[^>]*>/gi, '_[Images]_')            // image carousels (plural)
       .replace(/<(?:Async)?Image\b[^>]*>/gi, '_[Image]_')                  // single images (must follow the Group rule)
+      .replace(/<Cite\b[^>]*>/gi, '')                                      // web-search citation chips
       .replace(/<icon\b[^>]*?\bname=(?:"([^"]*)"|'([^']*)')[^>]*>/gi,
                (_, a, b) => iconGlyph(a ?? b))                            // directional icons -> glyph
-      .replace(/<icon\b[^>]*>/gi, '')                                      // other icons dropped
-      .replace(/<[A-Za-z][\w.-]*\s+[^<>]*?\/?>/g, '')                      // any tag WITH attributes (JSX components)
-      .replace(/<\/[A-Za-z][\w.-]*\s*>/g, '')                             // closing tags
-      .replace(/<[A-Za-z][\w.-]*\s*\/>/g, '')                            // self-closing, no attrs
-      .replace(/<[A-Za-z][\w]*-[\w-]*\s*>/g, '')                         // bare hyphenated components (e.g. <grid-item>)
-      .replace(/<(?:box|row|col|column|grid|stack|card|caption|section|container|spacer|divider|group|list)\b\s*>/gi, ''); // bare structural opens
+      .replace(/<icon\b[^>]*>/gi, '');                                     // other icons dropped
 
-    // De-indent the content that was nested inside components (otherwise 4+
-    // leading spaces would render as a code block), while keeping list markers.
+    // 5. Block text elements -> their own paragraph. <text weight=...> keeps its
+    //    emphasis as **bold**; captions become plain and badges italic.
+    t = t
+      .replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi, (_, attrs, inner) => {
+        const s = inner.trim();
+        if (!s) return '\n\n';
+        const bold = /weight\s*=\s*"?(?:medium|semibold|bold)/i.test(attrs);
+        return `\n\n${bold ? '**' + s + '**' : s}\n\n`;
+      })
+      .replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi, (_, inner) => {
+        const s = inner.trim();
+        return s ? `\n\n${s}\n\n` : '\n\n';
+      })
+      .replace(/<badge\b[^>]*>([\s\S]*?)<\/badge>/gi, (_, inner) => {
+        const s = inner.trim();
+        return s ? `\n\n_${s}_\n\n` : '\n\n';
+      });
+
+    // 6. Strip the remaining structural scaffolding. Block containers become a
+    //    paragraph break so adjacent cells never mash together.
+    t = t
+      .replace(/<[A-Za-z][\w.-]*\s+[^<>]*?\/?>/g, '\n\n')                  // any tag WITH attributes
+      .replace(/<\/[A-Za-z][\w.-]*\s*>/g, '\n\n')                         // closing tags
+      .replace(/<[A-Za-z][\w.-]*\s*\/>/g, '')                            // self-closing, no attrs
+      .replace(/<[A-Za-z][\w]*-[\w-]*\s*>/g, '\n\n')                     // bare hyphenated opens (e.g. <grid-item>)
+      .replace(/<(?:box|row|col|column|grid|stack|card|caption|section|container|spacer|divider|group|list)\b\s*>/gi, '\n\n'); // bare structural opens
+
+    // 7. De-indent nested content (so it isn't read as a code block), but leave
+    //    list markers' own indentation alone.
     t = t.replace(/^[ \t]+(?=\S)/gm, (ws, offset, str) => {
       const rest = str.slice(offset + ws.length);
       return /^([-*+]\s|\d+[.)]\s)/.test(rest) ? ws : '';
     });
 
-    t = t.replace(/\uE310(\d+)\uE311/g, (_, i) => code[+i]);
+    // 8. Restore protected blocks and code, then tidy whitespace.
+    t = t.replace(/(\d+)/g, (_, i) => blocks[+i]);
+    t = t.replace(/(\d+)/g, (_, i) => code[+i]);
     t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
     return t.trim();
   }
 
   // ChatGPT embeds rich-content directives in the text as tokens delimited by
-  // private-use characters: U+E200 <type> U+E202 <payload…> U+E201. In the app
+  // private-use characters: U+E200 <type> U+E202 <payload...> U+E201. In the app
   // these render as citation chips, image carousels, product cards; in raw text
   // they're noise. Strip citations, mark image groups and products.
   function cleanTokens(text) {
@@ -244,8 +425,8 @@ function setupChatGPTExporter() {
     text = cleanComponents(text); // strip rich-UI component tags first
     // Capture an optional preceding space so stripping a mid-line citation
     // doesn't leave a double space; markers keep the space.
-    let out = text.replace(/( ?)\uE200([^\uE201]*)\uE201/g, (_, sp, inner) => {
-      const segs = inner.split('\uE202');
+    let out = text.replace(/( ?)([^]*)/g, (_, sp, inner) => {
+      const segs = inner.split('');
       const type = segs[0] || '';
       if (type === 'image_group') return sp + '_[Images]_';
       if (type === 'product') {
@@ -257,7 +438,7 @@ function setupChatGPTExporter() {
       }
       return ''; // cite / filecite / unknown directives (drop the space too)
     });
-    out = out.replace(/[\uE200-\uE206]/g, '');           // sweep stray delimiters
+    out = out.replace(/[-]/g, '');           // sweep stray delimiters
     out = out.replace(/ +\n/g, '\n').replace(/\n{3,}/g, '\n\n'); // tidy whitespace
     return out;
   }
