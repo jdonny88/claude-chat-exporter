@@ -197,6 +197,9 @@ function setupChatGPTExporter() {
   // to a glyph so the flow survives; non-directional icons return '' (dropped).
   function iconGlyph(name) {
     const n = String(name || '').toLowerCase();
+    // Bidirectional / decorative arrows (e.g. arrow-left-right, up-down) aren't
+    // flow connectors, so drop them rather than emit a misleading single arrow.
+    if (/left.*right|right.*left|up.*down|down.*up/.test(n)) return '';
     if (/\bdown\b/.test(n)) return '↓';
     if (/\bup\b/.test(n)) return '↑';
     if (/\bright\b/.test(n)) return '→';
