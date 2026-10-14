@@ -140,7 +140,12 @@ their messages.
 - **Attachments** - Uploaded files are shown as placeholders, not embedded: `_[image]_` for images and `_[file: name]_` for other files
 - **Generated images** - Images ChatGPT generates are marked `_[Generated image]_` (the image itself is not embedded)
 - **Rich-content tokens** - ChatGPT's inline web-search citation chips are stripped; image carousels become `_[Images]_` and product cards `_[Product: name]_`
-- **Rich UI components** - Newer responses embed JSX-like layout components (`<box>`, `<row>`, `<text>`, `<icon>`, `<grid-item>`, `<AsyncImage>`, …) inside the message text; these are unwrapped to keep their content, so the export stays clean Markdown. Image carousels become `_[Images]_` and single images `_[Image]_`; directional icons in flow diagrams are rendered as arrow glyphs (`↓ ↑ → ←`) so the flow direction survives, while non-directional icons are dropped
+- **Rich UI components** - Newer responses embed a small JSX + Handlebars-like layout language inside the message text (`<box>`, `<row>`, `<grid>`, `<grid-item>`, `<text>`, `<caption>`, `<badge>`, `<table>`, `<list>`, and `{#each}`/`{#if}` template loops over inline data). The exporter reconstructs these as clean Markdown rather than dumping the raw markup:
+  - `{#each … as x} … {/each}` loops are expanded over their inline data (arrays of objects or arrays), including an optional index variable and `{#if}` conditionals
+  - `<table>` becomes a Markdown table; `<list>` becomes a Markdown (numbered/bulleted) list
+  - grid/box/card cells keep each label and value on its own line (no more mashing), with `<text weight=…>` labels kept as **bold** and captions/badges as their own lines
+  - image carousels become `_[Images]_` and single images `_[Image]_`
+  - directional icons in flow diagrams render as arrow glyphs (`↓ ↑ → ←`) so the flow survives; other icons are dropped; `<Cite>` chips are stripped
 - **Endpoint churn** - If OpenAI renames the backend endpoints, the constants above need updating
 
 ## Privacy & Security
