@@ -353,7 +353,7 @@ function setupChatGPTExporter() {
   // a flattened block begins and ends instead of it bleeding into the prose.
   // Depth is tracked over paired block tags and {#each}/{#if}; a region is a span
   // where depth rises from 0 and returns to 0.
-  function wrapDiagrams(text) {
+  function wrapDiagrams(text, rawBlocks) {
     const tokenRe = /<\/?[A-Za-z][\w.-]*(?:\s[^<>]*?)?\/?>|\{#(?:each|if)\b[^}]*\}|\{\/(?:each|if)\}/g;
     let depth = 0, start = -1, m;
     const regions = [];
@@ -383,10 +383,23 @@ function setupChatGPTExporter() {
     let out = text;
     for (let i = regions.length - 1; i >= 0; i--) {
       const [s, e] = regions[i];
-      out = out.slice(0, e) + `\n\n${DIAGRAM_END}\n\n` + out.slice(e);
+      // Preserve the exact raw markup (the lossless master the picture renders
+      // from) and re-emit it as a source block right before the end marker.
+      const idx = rawBlocks.push(text.slice(s, e)) - 1;
+      out = out.slice(0, e) + `\n\n${idx}\n\n${DIAGRAM_END}\n\n` + out.slice(e);
       out = out.slice(0, s) + `\n\n${DIAGRAM_START}\n\n` + out.slice(s);
     }
     return out;
+  }
+
+  // Format a preserved region's raw markup as a collapsible source block, so the
+  // full structure (nesting, grouping, connectors, 2D relationships) survives and
+  // the original diagram can be re-rendered from it later. Code spans captured as
+  // sentinels are restored here.
+  function formatRawBlock(raw, code) {
+    const src = raw.replace(/(\d+)/g, (_, i) => code[+i]).trim();
+    const fence = src.includes('```') ? '````' : '```';
+    return `<details><summary>Raw layout source (re-renderable)</summary>\n\n${fence}\n${src}\n${fence}\n\n</details>`;
   }
 
   function cleanComponents(text) {
@@ -397,12 +410,14 @@ function setupChatGPTExporter() {
     // whitespace normalisation that follows.
     const code = [];
     const blocks = [];
+    const rawBlocks = [];
     let t = text.replace(/```[\s\S]*?```|`[^`\n]+`/g,
       m => { code.push(m); return `${code.length - 1}`; });
 
     // 0b. Mark each top-level rich-component region (code already protected, so a
-    //     code block that merely mentions <box> can't be mistaken for a diagram).
-    t = wrapDiagrams(t);
+    //     code block that merely mentions <box> can't be mistaken for a diagram)
+    //     and stash its raw markup to re-emit as a source block at the end.
+    t = wrapDiagrams(t, rawBlocks);
 
     // 1. Expand {#each}/{#if} templates into concrete markup.
     t = expandTemplates(t);
@@ -507,6 +522,7 @@ function setupChatGPTExporter() {
     // 8. Restore protected blocks and code, then tidy whitespace.
     t = t.replace(/(\d+)/g, (_, i) => blocks[+i]);
     t = t.replace(/(\d+)/g, (_, i) => code[+i]);
+    t = t.replace(/(\d+)/g, (_, i) => formatRawBlock(rawBlocks[+i], code));
     t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
     return t.trim();
   }
