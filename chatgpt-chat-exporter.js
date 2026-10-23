@@ -591,11 +591,82 @@ function setupChatGPTExporter() {
     }
     return s.length;
   }
-  // Evaluate a JSX-style expression ({o.x+51}, ternaries, template literals) with
-  // the current loop scope. Runs only on your own exported conversation in your
-  // own browser — the same self-XSS trust boundary as pasting the exporter.
+  // Evaluate a JSX-style expression ({o.x+51}, ternaries, template literals,
+  // array/object literals, .split()/.slice()/.join()) against the current loop
+  // scope. A real parser, NOT new Function/eval — ChatGPT's page CSP forbids
+  // eval, and this is also safer (no code execution, just data).
+  const SVG_BINOP = { '||': 1, '&&': 2, '===': 3, '!==': 3, '==': 3, '!=': 3, '<': 4, '>': 4, '<=': 4, '>=': 4, '+': 5, '-': 5, '*': 6, '/': 6, '%': 6 };
+  function svgLex(s) {
+    const toks = []; let i = 0;
+    const ops = ['===', '!==', '==', '!=', '<=', '>=', '&&', '||', '<', '>', '+', '-', '*', '/', '%', '!', '?'];
+    while (i < s.length) {
+      const c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (c === '`') {
+        i++; const parts = []; let buf = '';
+        while (i < s.length && s[i] !== '`') {
+          if (s[i] === '$' && s[i + 1] === '{') { parts.push({ str: buf }); buf = ''; i += 2; let d = 1, e = ''; while (i < s.length && d > 0) { if (s[i] === '{') d++; else if (s[i] === '}') { d--; if (d === 0) break; } e += s[i]; i++; } i++; parts.push({ expr: e }); }
+          else { buf += s[i]; i++; }
+        }
+        i++; parts.push({ str: buf }); toks.push({ type: 'tmpl', parts }); continue;
+      }
+      if (c === '"' || c === "'") { const q = c; i++; let v = ''; while (i < s.length && s[i] !== q) { if (s[i] === '\\') { v += s[i + 1]; i += 2; } else { v += s[i]; i++; } } i++; toks.push({ type: 'str', value: v }); continue; }
+      if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(s[i + 1] || ''))) { let v = ''; while (i < s.length && /[0-9.]/.test(s[i])) { v += s[i]; i++; } toks.push({ type: 'num', value: parseFloat(v) }); continue; }
+      if (/[A-Za-z_$]/.test(c)) { let v = ''; while (i < s.length && /[\w$]/.test(s[i])) { v += s[i]; i++; } toks.push({ type: 'name', value: v }); continue; }
+      let m = false;
+      for (const op of ops) { if (s.startsWith(op, i)) { toks.push({ type: 'op', value: op }); i += op.length; m = true; break; } }
+      if (m) continue;
+      if ('()[]{}.,:'.indexOf(c) >= 0) { toks.push({ type: 'punct', value: c }); i++; continue; }
+      i++;
+    }
+    return toks;
+  }
+  function svgParse(s) {
+    const toks = svgLex(s); let p = 0;
+    const peek = () => toks[p], eat = () => toks[p++];
+    const expect = v => { const t = eat(); if (!t || t.value !== v) throw new Error('expected ' + v); };
+    function prim() {
+      const t = peek(); if (!t) throw new Error('eof');
+      if (t.type === 'num') { eat(); return { t: 'lit', v: t.value }; }
+      if (t.type === 'str') { eat(); return { t: 'lit', v: t.value }; }
+      if (t.type === 'tmpl') { eat(); return { t: 'tmpl', parts: t.parts.map(x => x.expr !== undefined ? { e: svgParse(x.expr) } : { s: x.str }) }; }
+      if (t.type === 'name') { eat(); if (t.value === 'true') return { t: 'lit', v: true }; if (t.value === 'false') return { t: 'lit', v: false }; if (t.value === 'null') return { t: 'lit', v: null }; if (t.value === 'undefined') return { t: 'lit', v: undefined }; return { t: 'var', n: t.value }; }
+      if (t.type === 'punct' && t.value === '(') { eat(); const e = tern(); expect(')'); return e; }
+      if (t.type === 'punct' && t.value === '[') { eat(); const items = []; if (!(peek() && peek().value === ']')) { items.push(tern()); while (peek() && peek().value === ',') { eat(); items.push(tern()); } } expect(']'); return { t: 'arr', items }; }
+      if (t.type === 'punct' && t.value === '{') { eat(); const props = []; if (!(peek() && peek().value === '}')) { do { const k = eat(); expect(':'); props.push({ k: k.value, v: tern() }); } while (peek() && peek().value === ',' && eat()); } expect('}'); return { t: 'obj', props }; }
+      throw new Error('unexpected');
+    }
+    function post() {
+      let e = prim();
+      for (; ;) { const t = peek(); if (t && t.type === 'punct' && t.value === '.') { eat(); const n = eat(); e = { t: 'mem', o: e, p: n.value, c: false }; } else if (t && t.type === 'punct' && t.value === '[') { eat(); const idx = tern(); expect(']'); e = { t: 'mem', o: e, p: idx, c: true }; } else if (t && t.type === 'punct' && t.value === '(') { eat(); const args = []; if (!(peek() && peek().value === ')')) { args.push(tern()); while (peek() && peek().value === ',') { eat(); args.push(tern()); } } expect(')'); e = { t: 'call', f: e, args }; } else break; }
+      return e;
+    }
+    function unary() { const t = peek(); if (t && t.type === 'op' && (t.value === '-' || t.value === '!')) { eat(); return { t: 'un', op: t.value, a: unary() }; } return post(); }
+    function bin(minp) { let left = unary(); for (; ;) { const t = peek(); if (!t || t.type !== 'op' || !(t.value in SVG_BINOP)) break; const pr = SVG_BINOP[t.value]; if (pr < minp) break; eat(); const right = bin(pr + 1); left = { t: 'bin', op: t.value, l: left, r: right }; } return left; }
+    function tern() { const c = bin(1); const t = peek(); if (t && t.type === 'op' && t.value === '?') { eat(); const a = tern(); expect(':'); const b = tern(); return { t: 'tern', c, a, b }; } return c; }
+    return tern();
+  }
+  function svgEvalAst(node, scope) {
+    switch (node.t) {
+      case 'lit': return node.v;
+      case 'var': return scope[node.n];
+      case 'tmpl': return node.parts.map(x => x.s !== undefined ? x.s : String(svgEvalAst(x.e, scope) ?? '')).join('');
+      case 'arr': return node.items.map(i => svgEvalAst(i, scope));
+      case 'obj': { const o = {}; for (const pr of node.props) o[pr.k] = svgEvalAst(pr.v, scope); return o; }
+      case 'mem': { const o = svgEvalAst(node.o, scope); const k = node.c ? svgEvalAst(node.p, scope) : node.p; return o == null ? undefined : o[k]; }
+      case 'call': { const f = node.f; if (f.t === 'mem') { const o = svgEvalAst(f.o, scope); const fn = o == null ? null : o[f.p]; const args = node.args.map(a => svgEvalAst(a, scope)); return typeof fn === 'function' ? fn.apply(o, args) : undefined; } return undefined; }
+      case 'un': { const a = svgEvalAst(node.a, scope); return node.op === '-' ? -a : !a; }
+      case 'bin': {
+        const l = svgEvalAst(node.l, scope), r = svgEvalAst(node.r, scope);
+        switch (node.op) { case '+': return l + r; case '-': return l - r; case '*': return l * r; case '/': return l / r; case '%': return l % r; case '===': return l === r; case '!==': return l !== r; case '==': return l == r; case '!=': return l != r; case '<': return l < r; case '>': return l > r; case '<=': return l <= r; case '>=': return l >= r; case '&&': return l && r; case '||': return l || r; }
+        return undefined;
+      }
+      case 'tern': return svgEvalAst(node.c, scope) ? svgEvalAst(node.a, scope) : svgEvalAst(node.b, scope);
+    }
+    return '';
+  }
   function svgEval(expr, scope) {
-    try { const keys = Object.keys(scope); return new Function(...keys, 'return (' + expr + ');')(...keys.map(k => scope[k])); }
+    try { return svgEvalAst(svgParse(String(expr)), scope || {}); }
     catch (e) { return ''; }
   }
   function svgTokenize(src) {
