@@ -340,13 +340,36 @@ function setupChatGPTExporter() {
     return lines.join('<br>');
   }
 
+  // Convert the inline components inside a single list item / table cell to inline
+  // Markdown, kept on one line (bold labels, badges, entity values, arrow glyphs),
+  // so a bulleted item like "**Yellow tables** — commonly the default" stays intact
+  // instead of leaving raw <text> tags or breaking onto separate lines.
+  function inlineClean(s) {
+    return s
+      .replace(/<[A-Za-z][\w.-]*\b[^>]*?\bvalue=(?:"([^"]*)"|'([^']*)'|\{`?([^}`]*)`?\})[^>]*?\/>/g, (_, a, b, c) => a ?? b ?? c ?? '')
+      .replace(/<(?:Async)?ImageGroup\b[^>]*>/gi, '_[Images]_')
+      .replace(/<(?:Async)?Image\b[^>]*>/gi, '_[Image]_')
+      .replace(/<Cite\b[^>]*>/gi, '')
+      .replace(/<icon\b[^>]*?\bname=(?:"([^"]*)"|'([^']*)')[^>]*>/gi, (_, a, b) => iconGlyph(a ?? b))
+      .replace(/<icon\b[^>]*>/gi, '')
+      .replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi, (_, at, inner) => {
+        const x = inner.replace(/\s+/g, ' ').trim();
+        if (!x) return '';
+        return /weight\s*=\s*"?(?:medium|semibold|bold)/i.test(at) ? '**' + x + '**' : x;
+      })
+      .replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi, (_, inner) => inner.replace(/\s+/g, ' ').trim())
+      .replace(/<badge\b[^>]*>([\s\S]*?)<\/badge>/gi, (_, inner) => { const x = inner.replace(/\s+/g, ' ').trim(); return x ? '_' + x + '_' : ''; })
+      .replace(/<\/?[A-Za-z][\w.-]*(?:\s[^<>]*?)?\/?>/g, ' ')
+      .replace(/[ \t]+/g, ' ').trim();
+  }
+
   const DIAGRAM_START = '**⟦ ChatGPT visual block — flattened from a rich layout ⟧**';
   const DIAGRAM_END = '**⟦ end of visual block ⟧**';
 
   // Paired, block-level component tags. Inline/self-closing ones (<Entity/>,
   // <AsyncImage/>, <Cite/>, <icon/>, <divider/>) are NOT here, so a citation or
   // entity sitting in ordinary prose never looks like the start of a diagram.
-  const BLOCK_TAG = /^(?:box|row|col|column|grid|grid-item|stack|card|text|caption|section|container|spacer|group|list|list-item|table|table-row|table-cell|badge)$/i;
+  const BLOCK_TAG = /^(?:box|grid|grid-item|row|col|column|stack|card|section|container|group)$/i;
 
   // Wrap each top-level rich-component region (a diagram / card grid / flow laid
   // out visually in the chat) with start/end markers, so a reader can tell where
@@ -384,21 +407,26 @@ function setupChatGPTExporter() {
     for (let i = regions.length - 1; i >= 0; i--) {
       const [s, e] = regions[i];
       const region = text.slice(s, e);
-      // Preserve the exact raw markup (the lossless master the picture renders
-      // from) and re-emit it as a collapsible source block inside the markers.
-      const idx = rawBlocks.push(region) - 1;
       const hasSvg = /<svg[\s>]/i.test(region);
-      const hasLayout = /<(?:box|grid|grid-item|card|stack|row|col|column|section|container|group)\b/i.test(region);
-      if (hasLayout && !hasSvg) {
-        // A card / grid layout: reconstruct the whole thing as an embedded image
-        // (its colours, nesting and icons carry meaning a flat table would lose).
+      // Only genuine rich layouts (card/grid frames, styled containers, or an
+      // SVG) are worth a marked visual block; a bare <row>/<col> of plain text
+      // is left to the normal flattening so an inline label never becomes a
+      // spurious "visual block" (standalone lists/tables aren't regions at all).
+      const rich = hasSvg
+        || /<(?:box|grid|grid-item|card|stack|section|container|group)\b/i.test(region)
+        || /\b(?:background|border|radius)\s*=/i.test(region);
+      if (!rich) continue;
+      // Preserve the exact raw markup (the lossless master) as a source block.
+      const idx = rawBlocks.push(region) - 1;
+      if (!hasSvg) {
+        // A card / grid layout: reconstruct the whole thing as an embedded image.
         const cidx = componentSources.push(region) - 1;
         out = out.slice(0, s)
           + `\n\n${DIAGRAM_START}\n\n\uE342${cidx}\uE343\n\n\uE330${idx}\uE331\n\n${DIAGRAM_END}\n\n`
           + out.slice(e);
       } else {
-        // Flatten to text in place (for SVG regions the <svg> itself is swapped
-        // for an image sentinel in the next step); just bracket it with markers.
+        // SVG region: the <svg> itself is swapped for an image sentinel in the
+        // next step; just bracket the (flattened) surrounding text with markers.
         out = out.slice(0, e) + `\n\n\uE330${idx}\uE331\n\n${DIAGRAM_END}\n\n` + out.slice(e);
         out = out.slice(0, s) + `\n\n${DIAGRAM_START}\n\n` + out.slice(s);
       }
@@ -448,7 +476,7 @@ function setupChatGPTExporter() {
     t = t.replace(/<table\b[^>]*>([\s\S]*?)<\/table>/gi, (_, body) => {
       const rows = [...body.matchAll(/<table-row\b[^>]*>([\s\S]*?)<\/table-row>/gi)].map(r =>
         [...r[1].matchAll(/<table-cell\b[^>]*>([\s\S]*?)<\/table-cell>/gi)]
-          .map(c => c[1].replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|')));
+          .map(c => inlineClean(c[1]).replace(/\|/g, '\\|')));
       if (!rows.length) return '';
       const ncol = Math.max(...rows.map(r => r.length));
       const line = cells => '| ' + cells.concat(Array(ncol - cells.length).fill('')).join(' | ') + ' |';
@@ -477,20 +505,13 @@ function setupChatGPTExporter() {
     // 3. Convert <list> -> Markdown list (protected block).
     t = t.replace(/<list\b([^>]*)>([\s\S]*?)<\/list>/gi, (_, attrs, body) => {
       const numbered = /marker\s*=\s*"?number/i.test(attrs);
-      const items = [...body.matchAll(/<list-item\b[^>]*>([\s\S]*?)<\/list-item>/gi)].map(x => x[1]);
-      if (!items.length) return '';
+      const items = [...body.matchAll(/<list-item\b[^>]*>([\s\S]*?)<\/list-item>/gi)].map(x => inlineClean(x[1]));
+      if (!items.filter(Boolean).length) return '';
       let n = 0;
       const md = items.map(it => {
         n++;
-        const marker = numbered ? `${n}. ` : '- ';
-        const indent = ' '.repeat(marker.length);
-        const lines = it.replace(/^\s*\n|\s+$/g, '').split('\n');
-        return lines.map((ln, i) => {
-          const s = ln.trim();
-          if (i === 0) return marker + s;
-          return s ? indent + s : '';
-        }).join('\n');
-      }).join('\n\n');
+        return (numbered ? `${n}. ` : '- ') + it;
+      }).join('\n');
       blocks.push(md);
       return `\n\n${blocks.length - 1}\n\n`;
     });
@@ -923,7 +944,7 @@ function setupChatGPTExporter() {
         document.body.removeChild(probe);
         const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + h + '"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:' + width + 'px;background:#fff;color:#111827;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:12px">' + html + '</div></foreignObject></svg>';
         const img = new Image();
-        img.onload = () => { try { const sc = 2; const cv = document.createElement('canvas'); cv.width = width * sc; cv.height = h * sc; const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height); resolve(cv.toDataURL('image/png')); } catch (e) { resolve(null); } };
+        img.onload = () => { try { const sc = 3; const cv = document.createElement('canvas'); cv.width = width * sc; cv.height = h * sc; const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height); resolve(cv.toDataURL('image/png')); } catch (e) { resolve(null); } };
         img.onerror = () => resolve(null);
         img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
       } catch (e) { resolve(null); }
@@ -935,7 +956,7 @@ function setupChatGPTExporter() {
     let out = md;
     const svgRe = /(\d+)/g;
     const svgUris = {};
-    for (const id of [...out.matchAll(svgRe)].map(m => +m[1])) { if (svgUris[id] !== undefined) continue; const s = renderSvgString(svgSources[id] || ''); svgUris[id] = s ? await svgToPng(s, 2) : null; }
+    for (const id of [...out.matchAll(svgRe)].map(m => +m[1])) { if (svgUris[id] !== undefined) continue; const s = renderSvgString(svgSources[id] || ''); svgUris[id] = s ? await svgToPng(s, 3) : null; }
     out = out.replace(svgRe, (_, i) => (svgUris[+i] ? '![ChatGPT diagram](' + svgUris[+i] + ')' : '_[diagram — see raw source below]_'));
     const cRe = /(\d+)/g;
     const cUris = {};
