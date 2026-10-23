@@ -331,13 +331,75 @@ function setupChatGPTExporter() {
       .replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi, (_, at, inner) => {
         const x = inner.trim();
         if (!x) return '\n';
-        return (/weight\s*=\s*"?(?:medium|semibold|bold)/i.test(at) ? '**' + x + '**' : x) + '\n';
+        return '\n' + (/weight\s*=\s*"?(?:medium|semibold|bold)/i.test(at) ? '**' + x + '**' : x) + '\n';
       })
-      .replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi, (_, inner) => (inner.trim() ? inner.trim() + '\n' : '\n'))
-      .replace(/<badge\b[^>]*>([\s\S]*?)<\/badge>/gi, (_, inner) => (inner.trim() ? '_' + inner.trim() + '_\n' : '\n'))
+      .replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi, (_, inner) => (inner.trim() ? '\n' + inner.trim() + '\n' : '\n'))
+      .replace(/<badge\b[^>]*>([\s\S]*?)<\/badge>/gi, (_, inner) => (inner.trim() ? '\n_' + inner.trim() + '_\n' : '\n'))
       .replace(/<\/?[A-Za-z][\w.-]*(?:\s[^<>]*?)?\/?>/g, '\n');   // strip remaining tags
     const lines = s.split('\n').map(x => x.trim()).filter(Boolean).map(x => x.replace(/\|/g, '\\|'));
     return lines.join('<br>');
+  }
+
+  const DIAGRAM_START = '**⟦ ChatGPT visual block — flattened from a rich layout ⟧**';
+  const DIAGRAM_END = '**⟦ end of visual block ⟧**';
+
+  // Paired, block-level component tags. Inline/self-closing ones (<Entity/>,
+  // <AsyncImage/>, <Cite/>, <icon/>, <divider/>) are NOT here, so a citation or
+  // entity sitting in ordinary prose never looks like the start of a diagram.
+  const BLOCK_TAG = /^(?:box|row|col|column|grid|grid-item|stack|card|text|caption|section|container|spacer|group|list|list-item|table|table-row|table-cell|badge)$/i;
+
+  // Wrap each top-level rich-component region (a diagram / card grid / flow laid
+  // out visually in the chat) with start/end markers, so a reader can tell where
+  // a flattened block begins and ends instead of it bleeding into the prose.
+  // Depth is tracked over paired block tags and {#each}/{#if}; a region is a span
+  // where depth rises from 0 and returns to 0.
+  function wrapDiagrams(text, rawBlocks) {
+    const tokenRe = /<\/?[A-Za-z][\w.-]*(?:\s[^<>]*?)?\/?>|\{#(?:each|if)\b[^}]*\}|\{\/(?:each|if)\}/g;
+    let depth = 0, start = -1, m;
+    const regions = [];
+    while ((m = tokenRe.exec(text))) {
+      const tok = m[0];
+      let delta = 0;
+      if (tok[0] === '{') {
+        delta = tok[1] === '#' ? 1 : -1;
+      } else if (/\/>$/.test(tok)) {
+        delta = 0;                                   // self-closing: no nesting
+      } else if (tok[1] === '/') {
+        const name = tok.slice(2).match(/[A-Za-z][\w.-]*/);
+        if (name && BLOCK_TAG.test(name[0])) delta = -1;
+      } else {
+        const name = tok.slice(1).match(/[A-Za-z][\w.-]*/);
+        if (name && BLOCK_TAG.test(name[0])) delta = 1;
+      }
+      if (delta > 0 && depth === 0) start = m.index;
+      depth += delta;
+      if (depth <= 0) {
+        if (delta < 0 && start >= 0) regions.push([start, m.index + tok.length]);
+        depth = 0;
+        start = -1;
+      }
+    }
+    if (!regions.length) return text;
+    let out = text;
+    for (let i = regions.length - 1; i >= 0; i--) {
+      const [s, e] = regions[i];
+      // Preserve the exact raw markup (the lossless master the picture renders
+      // from) and re-emit it as a source block right before the end marker.
+      const idx = rawBlocks.push(text.slice(s, e)) - 1;
+      out = out.slice(0, e) + `\n\n${idx}\n\n${DIAGRAM_END}\n\n` + out.slice(e);
+      out = out.slice(0, s) + `\n\n${DIAGRAM_START}\n\n` + out.slice(s);
+    }
+    return out;
+  }
+
+  // Format a preserved region's raw markup as a collapsible source block, so the
+  // full structure (nesting, grouping, connectors, 2D relationships) survives and
+  // the original diagram can be re-rendered from it later. Code spans captured as
+  // sentinels are restored here.
+  function formatRawBlock(raw, code) {
+    const src = raw.replace(/(\d+)/g, (_, i) => code[+i]).trim();
+    const fence = src.includes('```') ? '````' : '```';
+    return `<details><summary>Raw layout source (re-renderable)</summary>\n\n${fence}\n${src}\n${fence}\n\n</details>`;
   }
 
   function cleanComponents(text) {
@@ -348,8 +410,14 @@ function setupChatGPTExporter() {
     // whitespace normalisation that follows.
     const code = [];
     const blocks = [];
+    const rawBlocks = [];
     let t = text.replace(/```[\s\S]*?```|`[^`\n]+`/g,
       m => { code.push(m); return `${code.length - 1}`; });
+
+    // 0b. Mark each top-level rich-component region (code already protected, so a
+    //     code block that merely mentions <box> can't be mistaken for a diagram)
+    //     and stash its raw markup to re-emit as a source block at the end.
+    t = wrapDiagrams(t, rawBlocks);
 
     // 1. Expand {#each}/{#if} templates into concrete markup.
     t = expandTemplates(t);
@@ -454,6 +522,7 @@ function setupChatGPTExporter() {
     // 8. Restore protected blocks and code, then tidy whitespace.
     t = t.replace(/(\d+)/g, (_, i) => blocks[+i]);
     t = t.replace(/(\d+)/g, (_, i) => code[+i]);
+    t = t.replace(/(\d+)/g, (_, i) => formatRawBlock(rawBlocks[+i], code));
     t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
     return t.trim();
   }

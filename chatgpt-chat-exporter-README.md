@@ -147,6 +147,8 @@ their messages.
   - single-column boxes/stacks keep each label and value on its own line (no more mashing), with `<text weight=…>` labels kept as **bold** and captions/badges as their own lines
   - image carousels become `_[Images]_` and single images `_[Image]_`
   - directional icons in flow diagrams render as arrow glyphs (`↓ ↑ → ←`) so the flow survives; other icons are dropped; `<Cite>` chips are stripped
+  - each reconstructed block is wrapped in `**⟦ ChatGPT visual block … ⟧**` / `**⟦ end of visual block ⟧**` markers, so you can tell where a flattened diagram/layout begins and ends instead of it bleeding into the surrounding prose (ordinary prose and normal Markdown tables are not marked)
+  - **the exact raw layout source is preserved** inside each visual block, in a collapsible `<details>Raw layout source</details>` section. Flattening a complex 2D diagram to Markdown necessarily loses some structure (nesting, grouping, connectors, left-to-right relationships); keeping the verbatim source means nothing is lost — it's the full-fidelity master the original picture renders from, so the diagram can be re-created from it later
 - **Endpoint churn** - If OpenAI renames the backend endpoints, the constants above need updating
 
 ## Privacy & Security
