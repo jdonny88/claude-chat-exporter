@@ -792,8 +792,13 @@ function setupChatGPTExporter() {
         const vb = (svgString.match(/viewBox="([^"]+)"/i) || [])[1];
         let w = 600, h = 400;
         if (vb) { const p = vb.trim().split(/[\s,]+/).map(Number); if (p.length === 4 && p[2] && p[3]) { w = p[2]; h = p[3]; } }
+        // Force a sans-serif stack: a standalone SVG has no page CSS to inherit,
+        // so <text> without a font-family would fall back to the SVG default
+        // (serif / Times) and look nothing like the chat. A <style> rule beats
+        // any presentation attribute, so all text renders in the system sans.
+        const fontCss = "text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}";
         let s = svgString
-          .replace(/^<svg\b([^>]*)>/i, (m0, a) => '<svg' + a.replace(/\swidth="[^"]*"/i, '').replace(/\sheight="[^"]*"/i, '') + ' width="' + w + '" height="' + h + '">')
+          .replace(/^<svg\b([^>]*)>/i, (m0, a) => '<svg' + a.replace(/\swidth="[^"]*"/i, '').replace(/\sheight="[^"]*"/i, '') + ' width="' + w + '" height="' + h + '"><style>' + fontCss + '</style>')
           .replace(/currentColor/g, '#4b5563');
         if (!/xmlns=/.test(s.slice(0, 120))) s = s.replace(/^<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
         const img = new Image();
