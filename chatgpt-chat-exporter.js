@@ -404,7 +404,7 @@ function setupChatGPTExporter() {
 
   function cleanComponents(text) {
     if (!text) return text;
-    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|list|Entity|Cite|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b|\{#(?:each|if)\b/i.test(text)) return text;
+    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|list|svg|Entity|Cite|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b|\{#(?:each|if)\b/i.test(text)) return text;
 
     // Protect code spans/blocks and (later) generated tables/lists from the
     // whitespace normalisation that follows.
@@ -418,6 +418,14 @@ function setupChatGPTExporter() {
     //     code block that merely mentions <box> can't be mistaken for a diagram)
     //     and stash its raw markup to re-emit as a source block at the end.
     t = wrapDiagrams(t, rawBlocks);
+
+    // 0c. Replace each inline <svg> with a sentinel (rasterised to an embedded
+    //     PNG after the document is built). The surrounding box title/caption
+    //     still flatten to text; only the drawing becomes an image.
+    t = t.replace(/<svg\b[\s\S]*?<\/svg>/gi, m => {
+      const svg = m.replace(/(\d+)/g, (_, i) => code[+i]);
+      return `\n\n${svgSources.push(svg) - 1}\n\n`;
+    });
 
     // 1. Expand {#each}/{#if} templates into concrete markup.
     t = expandTemplates(t);
@@ -554,6 +562,162 @@ function setupChatGPTExporter() {
     return out;
   }
 
+  // --- Rich-diagram SVG -> embedded PNG ------------------------------------
+  // The most visually-rich ChatGPT diagrams are inline SVG. Flattening them to
+  // text loses the picture, so instead we reconstruct the SVG (expand {#each},
+  // evaluate the JSX-style expressions, fix camelCase attributes) and rasterise
+  // it to a PNG data URI embedded directly in the Markdown — so the diagram
+  // survives into a PDF / e-reader without any sidecar files. cleanComponents
+  // replaces each <svg> with a sentinel and stashes its markup here; the images
+  // are produced after the whole document is built (rasterising needs the DOM).
+  const svgSources = [];
+
+  const SVG_KEBAB = {
+    fontSize: 'font-size', fontWeight: 'font-weight', fontFamily: 'font-family',
+    textAnchor: 'text-anchor', strokeWidth: 'stroke-width', strokeOpacity: 'stroke-opacity',
+    strokeDasharray: 'stroke-dasharray', strokeLinecap: 'stroke-linecap',
+    strokeLinejoin: 'stroke-linejoin', fillOpacity: 'fill-opacity',
+    strokeDashoffset: 'stroke-dashoffset', dominantBaseline: 'dominant-baseline'
+  };
+
+  function svgMatchBrace(s, i) {
+    let d = 0;
+    for (let k = i; k < s.length; k++) {
+      const c = s[k];
+      if (c === '"' || c === "'") { const q = c; k++; while (k < s.length && s[k] !== q) { if (s[k] === '\\') k++; k++; } continue; }
+      if (c === '`') { k++; while (k < s.length && s[k] !== '`') { if (s[k] === '\\') k++; else if (s[k] === '$' && s[k + 1] === '{') { let dd = 1; k += 2; while (k < s.length && dd > 0) { if (s[k] === '{') dd++; else if (s[k] === '}') dd--; k++; } continue; } k++; } continue; }
+      if (c === '{' || c === '[') d++;
+      else if (c === '}' || c === ']') { d--; if (d === 0) return k; }
+    }
+    return s.length;
+  }
+  // Evaluate a JSX-style expression ({o.x+51}, ternaries, template literals) with
+  // the current loop scope. Runs only on your own exported conversation in your
+  // own browser — the same self-XSS trust boundary as pasting the exporter.
+  function svgEval(expr, scope) {
+    try { const keys = Object.keys(scope); return new Function(...keys, 'return (' + expr + ');')(...keys.map(k => scope[k])); }
+    catch (e) { return ''; }
+  }
+  function svgTokenize(src) {
+    const toks = []; let i = 0, ts = 0;
+    const flush = e => { const t = src.slice(ts, e); if (t) toks.push({ type: 'text', value: t }); };
+    while (i < src.length) {
+      const c = src[i];
+      if (c === '<' && /[A-Za-z/]/.test(src[i + 1] || '')) {
+        flush(i); let j = i + 1, close = false;
+        if (src[j] === '/') { close = true; j++; }
+        let name = ''; while (j < src.length && /[\w.-]/.test(src[j])) { name += src[j]; j++; }
+        let k = j;
+        while (k < src.length && src[k] !== '>') {
+          if (src[k] === '"' || src[k] === "'") { const q = src[k]; k++; while (k < src.length && src[k] !== q) k++; k++; continue; }
+          if (src[k] === '`') { k++; while (k < src.length && src[k] !== '`') k++; k++; continue; }
+          if (src[k] === '{') { k = svgMatchBrace(src, k) + 1; continue; }
+          k++;
+        }
+        let attrs = src.slice(j, k).trim(); let self = attrs.endsWith('/'); if (self) attrs = attrs.slice(0, -1).trim();
+        toks.push(close ? { type: 'close', name } : { type: 'open', name, attrs, self });
+        i = k + 1; ts = i; continue;
+      }
+      if (c === '{') {
+        if (src.startsWith('{#each', i)) { flush(i); const e = svgMatchBrace(src, i); const m = src.slice(i + 1, e).match(/^#each\s+([\s\S]*?)\s+as\s+(\w+)(?:\s*,\s*(\w+))?\s*$/); toks.push({ type: 'each', expr: m ? m[1] : '[]', var: m ? m[2] : '_it', idx: m ? m[3] : null }); i = e + 1; ts = i; continue; }
+        if (src.startsWith('{/each}', i)) { flush(i); toks.push({ type: 'eachEnd' }); i += 7; ts = i; continue; }
+        if (src.startsWith('{#if', i)) { flush(i); const e = svgMatchBrace(src, i); toks.push({ type: 'if', expr: src.slice(i + 4, e).trim() }); i = e + 1; ts = i; continue; }
+        if (src.startsWith('{/if}', i)) { flush(i); toks.push({ type: 'ifEnd' }); i += 5; ts = i; continue; }
+        flush(i); const e = svgMatchBrace(src, i); toks.push({ type: 'expr', expr: src.slice(i + 1, e) }); i = e + 1; ts = i; continue;
+      }
+      i++;
+    }
+    flush(src.length); return toks;
+  }
+  function svgBuildTree(toks) {
+    const root = { type: 'root', children: [] }; const st = [root]; const top = () => st[st.length - 1];
+    const VOIDS = new Set(['rect', 'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'use', 'stop', 'br']);
+    for (const t of toks) {
+      if (t.type === 'open') { const n = { type: 'el', name: t.name, attrs: t.attrs, children: [] }; top().children.push(n); if (!t.self && !VOIDS.has(t.name.toLowerCase())) st.push(n); }
+      else if (t.type === 'close') { for (let s = st.length - 1; s > 0; s--) { if (st[s].type === 'el' && st[s].name === t.name) { st.length = s; break; } } }
+      else if (t.type === 'each') { const n = { type: 'each', expr: t.expr, var: t.var, idx: t.idx, children: [] }; top().children.push(n); st.push(n); }
+      else if (t.type === 'eachEnd') { for (let s = st.length - 1; s > 0; s--) { if (st[s].type === 'each') { st.length = s; break; } } }
+      else if (t.type === 'if') { const n = { type: 'if', expr: t.expr, children: [] }; top().children.push(n); st.push(n); }
+      else if (t.type === 'ifEnd') { for (let s = st.length - 1; s > 0; s--) { if (st[s].type === 'if') { st.length = s; break; } } }
+      else top().children.push(t);
+    }
+    return root;
+  }
+  function svgParseAttrs(s) {
+    const out = {}; let i = 0;
+    while (i < s.length) {
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (i >= s.length) break;
+      let name = ''; while (i < s.length && /[\w:-]/.test(s[i])) { name += s[i]; i++; }
+      if (!name) { i++; continue; }
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (s[i] === '=') {
+        i++; while (i < s.length && /\s/.test(s[i])) i++;
+        if (s[i] === '"' || s[i] === "'") { const q = s[i]; i++; let v = ''; while (i < s.length && s[i] !== q) { v += s[i]; i++; } i++; out[name] = { kind: 'str', val: v }; }
+        else if (s[i] === '{') { const e = svgMatchBrace(s, i); out[name] = { kind: 'expr', val: s.slice(i + 1, e) }; i = e + 1; }
+        else { let v = ''; while (i < s.length && !/\s/.test(s[i])) { v += s[i]; i++; } out[name] = { kind: 'bare', val: v }; }
+      } else out[name] = { kind: 'flag', val: true };
+    }
+    return out;
+  }
+  function svgWalk(node, scope) {
+    if (node.type === 'root') return node.children.map(c => svgWalk(c, scope)).join('');
+    if (node.type === 'text') return node.value;
+    if (node.type === 'expr') { const v = svgEval(node.expr, scope); return v == null ? '' : String(v); }
+    if (node.type === 'each') { let a = svgEval(node.expr, scope); if (!Array.isArray(a)) a = []; return a.map((it, idx) => { const s2 = Object.assign({}, scope); s2[node.var] = it; if (node.idx) s2[node.idx] = idx; return node.children.map(c => svgWalk(c, s2)).join(''); }).join(''); }
+    if (node.type === 'if') return svgEval(node.expr, scope) ? node.children.map(c => svgWalk(c, scope)).join('') : '';
+    if (node.type === 'el') {
+      const attrs = svgParseAttrs(node.attrs || ''); const parts = [];
+      for (const k in attrs) { const a = attrs[k]; if (a.kind === 'flag') { parts.push(k); continue; } const v = a.kind === 'expr' ? svgEval(a.val, scope) : a.val; parts.push((SVG_KEBAB[k] || k) + '="' + String(v).replace(/"/g, '&quot;') + '"'); }
+      const inner = node.children.map(c => svgWalk(c, scope)).join('');
+      return '<' + node.name + (parts.length ? ' ' + parts.join(' ') : '') + '>' + inner + '</' + node.name + '>';
+    }
+    return '';
+  }
+  // Reconstruct an <svg> string (expanded, attrs fixed) from the stashed markup.
+  function renderSvgString(markup) {
+    try { const s = svgWalk(svgBuildTree(svgTokenize(markup)), {}); const m = s.match(/<svg[\s\S]*<\/svg>/i); return m ? m[0] : null; }
+    catch (e) { return null; }
+  }
+  // Rasterise an SVG string to a PNG data URI via a canvas (in-browser).
+  function svgToPng(svgString, scale) {
+    return new Promise(resolve => {
+      try {
+        const vb = (svgString.match(/viewBox="([^"]+)"/i) || [])[1];
+        let w = 600, h = 400;
+        if (vb) { const p = vb.trim().split(/[\s,]+/).map(Number); if (p.length === 4 && p[2] && p[3]) { w = p[2]; h = p[3]; } }
+        let s = svgString
+          .replace(/^<svg\b([^>]*)>/i, (m0, a) => '<svg' + a.replace(/\swidth="[^"]*"/i, '').replace(/\sheight="[^"]*"/i, '') + ' width="' + w + '" height="' + h + '">')
+          .replace(/currentColor/g, '#4b5563');
+        if (!/xmlns=/.test(s.slice(0, 120))) s = s.replace(/^<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const cv = document.createElement('canvas'); cv.width = Math.round(w * scale); cv.height = Math.round(h * scale);
+            const ctx = cv.getContext('2d'); ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
+            ctx.drawImage(img, 0, 0, cv.width, cv.height);
+            resolve(cv.toDataURL('image/png'));
+          } catch (e) { resolve(null); }
+        };
+        img.onerror = () => resolve(null);
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(s);
+      } catch (e) { resolve(null); }
+    });
+  }
+  // Replace each SVG sentinel in the built Markdown with an embedded PNG image.
+  async function embedSvgImages(md) {
+    const re = /(\d+)/g;
+    const ids = [...md.matchAll(re)].map(m => +m[1]);
+    if (!ids.length) return md;
+    const uris = {};
+    for (const id of ids) {
+      if (uris[id] !== undefined) continue;
+      const svg = renderSvgString(svgSources[id] || '');
+      uris[id] = svg ? await svgToPng(svg, 2) : null;
+    }
+    return md.replace(re, (_, i) => (uris[+i] ? '![ChatGPT diagram](' + uris[+i] + ')' : '_[diagram — see raw source below]_'));
+  }
+
   // Turn a message's content object into Markdown text.
   function extractContent(message) {
     const c = message.content;
@@ -672,11 +836,15 @@ function setupChatGPTExporter() {
 
       setStatus('Building Markdown...');
       const nodes = linearizeActiveBranch(data);
-      const { markdown, count } = buildMarkdown(data, nodes);
+      const { markdown: rawMarkdown, count } = buildMarkdown(data, nodes);
 
       if (count === 0) {
         throw new Error('No messages found in the conversation payload.');
       }
+
+      // Rasterise any inline SVG diagrams to PNGs embedded in the Markdown.
+      if (svgSources.length) setStatus(`Rendering ${svgSources.length} diagram(s)...`);
+      const markdown = await embedSvgImages(rawMarkdown);
 
       const filename = getFilename(data);
       downloadMarkdown(markdown, filename);
