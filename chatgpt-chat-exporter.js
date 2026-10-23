@@ -383,11 +383,25 @@ function setupChatGPTExporter() {
     let out = text;
     for (let i = regions.length - 1; i >= 0; i--) {
       const [s, e] = regions[i];
+      const region = text.slice(s, e);
       // Preserve the exact raw markup (the lossless master the picture renders
-      // from) and re-emit it as a source block right before the end marker.
-      const idx = rawBlocks.push(text.slice(s, e)) - 1;
-      out = out.slice(0, e) + `\n\n${idx}\n\n${DIAGRAM_END}\n\n` + out.slice(e);
-      out = out.slice(0, s) + `\n\n${DIAGRAM_START}\n\n` + out.slice(s);
+      // from) and re-emit it as a collapsible source block inside the markers.
+      const idx = rawBlocks.push(region) - 1;
+      const hasSvg = /<svg[\s>]/i.test(region);
+      const hasLayout = /<(?:box|grid|grid-item|card|stack|row|col|column|section|container|group)\b/i.test(region);
+      if (hasLayout && !hasSvg) {
+        // A card / grid layout: reconstruct the whole thing as an embedded image
+        // (its colours, nesting and icons carry meaning a flat table would lose).
+        const cidx = componentSources.push(region) - 1;
+        out = out.slice(0, s)
+          + `\n\n${DIAGRAM_START}\n\n\uE342${cidx}\uE343\n\n\uE330${idx}\uE331\n\n${DIAGRAM_END}\n\n`
+          + out.slice(e);
+      } else {
+        // Flatten to text in place (for SVG regions the <svg> itself is swapped
+        // for an image sentinel in the next step); just bracket it with markers.
+        out = out.slice(0, e) + `\n\n\uE330${idx}\uE331\n\n${DIAGRAM_END}\n\n` + out.slice(e);
+        out = out.slice(0, s) + `\n\n${DIAGRAM_START}\n\n` + out.slice(s);
+      }
     }
     return out;
   }
@@ -775,18 +789,159 @@ function setupChatGPTExporter() {
       } catch (e) { resolve(null); }
     });
   }
-  // Replace each SVG sentinel in the built Markdown with an embedded PNG image.
-  async function embedSvgImages(md) {
-    const re = /(\d+)/g;
-    const ids = [...md.matchAll(re)].map(m => +m[1]);
-    if (!ids.length) return md;
-    const uris = {};
-    for (const id of ids) {
-      if (uris[id] !== undefined) continue;
-      const svg = renderSvgString(svgSources[id] || '');
-      uris[id] = svg ? await svgToPng(svg, 2) : null;
+  // --- box/grid layouts -> embedded PNG (reconstructed HTML, rasterised) -----
+  // Card/grid layouts carry meaning in their colours, nesting and icons that a
+  // flat table loses. Reconstruct them as HTML and rasterise to a PNG the same
+  // way as the SVGs — in-browser via an <svg><foreignObject> wrapper drawn to a
+  // canvas (no library, no network). cleanComponents stashes the raw markup
+  // here and emits a sentinel; the images are produced after the doc is built.
+  const componentSources = [];
+
+  const H_RADIUS = { sm: 6, md: 8, lg: 12, xl: 16, full: 999 };
+  const H_FS = { '3xs': 9, '2xs': 10, xs: 11, sm: 13, base: 14, md: 15, lg: 17, xl: 20, '2xl': 26, '3xl': 30 };
+  const H_FW = { normal: 400, medium: 500, semibold: 600, bold: 700 };
+  const H_COLOR = { secondary: '#6b7280', tertiary: '#9ca3af', subtle: '#9ca3af', info: '#3b82f6', success: '#16a34a', caution: '#d97706', danger: '#dc2626', default: '#111827' };
+  const H_BG = { surface: '#ffffff', 'surface-secondary': '#f3f4f6', 'surface-tertiary': '#e9eaed' };
+  const H_BORDER = '#e5e7eb';
+  const ARROW_GLYPH = { 'arrow-down': '↓', 'arrow-up': '↑', 'arrow-right': '→', 'arrow-left': '←', 'arrow-left-right': '↔', 'arrow-up-down': '↕', 'chevron-down': '↓', 'chevron-right': '→' };
+  // Inline fallbacks (24x24 stroke) for the icons these diagrams use.
+  const ICON_FALLBACK = {
+    'database': '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+    'user-round': '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 1 0-16 0"/>',
+    'user': '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    'network': '<rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/>',
+    'monitor': '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+    'activity': '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+    'files': '<path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/>',
+    'layers': '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+    'globe-2': '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+    'git-branch': '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+    'refresh-cw': '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+    'boxes': '<path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19V13l-5-3-4.03 2.92Z"/><path d="M12 13V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10l-5 3Z"/><path d="M7 10V5l5-3 5 3v5"/>',
+    'shapes': '<path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/>',
+    'route': '<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
+    'list-tree': '<path d="M21 12h-8"/><path d="M21 6H8"/><path d="M21 18h-8"/><path d="M3 6v4c0 1.1.9 2 2 2h3"/><path d="M3 10v6c0 1.1.9 2 2 2h3"/>',
+    'hard-drive': '<line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/>',
+    'history': '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+    'workflow': '<rect x="3" y="3" width="8" height="8" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect x="13" y="13" width="8" height="8" rx="2"/>'
+  };
+  function resolveIcon(name, px, col) {
+    if (ARROW_GLYPH[name]) return '<span style="font-size:' + Math.round(px * 0.95) + 'px;color:' + col + ';line-height:1">' + ARROW_GLYPH[name] + '</span>';
+    // Prefer a clone of the page's real Lucide icon (exact match to the chat).
+    try {
+      const el = document.querySelector('svg.lucide-' + name + ', svg[data-lucide="' + name + '"]');
+      if (el) { const c = el.cloneNode(true); c.setAttribute('width', px); c.setAttribute('height', px); c.setAttribute('stroke', col); c.removeAttribute('class'); return new XMLSerializer().serializeToString(c); }
+    } catch (e) { /* fall through */ }
+    const inner = ICON_FALLBACK[name];
+    if (inner) return '<svg xmlns="http://www.w3.org/2000/svg" width="' + px + '" height="' + px + '" viewBox="0 0 24 24" fill="none" stroke="' + col + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' + px + '" height="' + px + '" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4" fill="none" stroke="' + col + '" stroke-width="1.6"/></svg>';
+  }
+
+  function cEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function cVal(attrs, name, scope) { const a = attrs[name]; if (!a) return undefined; if (a.kind === 'expr') return svgEval(a.val, scope); return a.val; }
+  function cRawVal(attrs, name, scope) { const a = attrs[name]; if (!a) return undefined; if (a.kind === 'expr') { const v = a.val.trim(); if (/^\d+$/.test(v)) return +v; return svgEval(a.val, scope); } return a.val; }
+  function cSpacing(v) { if (v == null) return null; if (typeof v === 'number') return v * 4 + 'px'; if (/^\d+$/.test(v)) return (+v * 4) + 'px'; return String(v); }
+  function cColor(v) { return (v && H_COLOR[v]) || (typeof v === 'string' && /^(#|rgb)/.test(v) ? v : H_COLOR.default); }
+  function cFlexA(v) { return v === 'start' ? 'flex-start' : v === 'end' ? 'flex-end' : v; }
+  function cFlexJ(v) { return v === 'between' ? 'space-between' : v === 'start' ? 'flex-start' : v === 'end' ? 'flex-end' : v; }
+  function cBorder(a, scope, st) {
+    if (!a) return;
+    if (a.kind === 'flag' || a.val === true) { st.push('border:1px solid ' + H_BORDER); return; }
+    if (a.kind === 'expr') { const o = svgEval(a.val, scope); if (o && typeof o === 'object') { if (o.top) { st.push('border-top:' + (o.top.size || 1) + 'px solid ' + cColor(o.top.color)); return; } st.push('border:' + (o.size || 1) + 'px solid ' + cColor(o.color)); return; } }
+    st.push('border:1px solid ' + H_BORDER);
+  }
+  function cNode(node, scope) {
+    if (node.type === 'text') { let t = cEsc(node.value).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>'); t = t.replace(/[ \t]*\n[ \t]*/g, ' ').trim(); return t ? '<div style="line-height:1.4">' + t + '</div>' : ''; }
+    if (node.type === 'expr') { return cEsc(svgEval(node.expr, scope) ?? ''); }
+    if (node.type === 'each') { let a = svgEval(node.expr, scope); if (!Array.isArray(a)) a = []; return a.map((it, i) => { const s = Object.assign({}, scope); s[node.var] = it; if (node.idx) s[node.idx] = i; return node.children.map(c => cNode(c, s)).join(''); }).join(''); }
+    if (node.type === 'if') { return svgEval(node.expr, scope) ? node.children.map(c => cNode(c, scope)).join('') : ''; }
+    if (node.type === 'el') return cEl(node, scope);
+    if (node.type === 'root') return node.children.map(c => cNode(c, scope)).join('');
+    return '';
+  }
+  function cEl(node, scope) {
+    const lname = node.name.toLowerCase();
+    if (lname === 'svg') return svgWalk(svgBuildTree(svgTokenize('<svg' + (node.attrs ? ' ' + node.attrs : '') + '>' + node.children.map(c => cRawChild(c)).join('') + '</svg>')), scope);
+    const attrs = svgParseAttrs(node.attrs || '');
+    if (lname === 'cite') return '';
+    if (lname === 'entity') return cEsc(cVal(attrs, 'value', scope) || '');
+    if (lname === 'asyncimage' || lname === 'image' || lname === 'asyncimagegroup') return '<div style="border:1px dashed #cbd5e1;border-radius:8px;padding:12px;color:#64748b;font-size:12px;text-align:center">[ image ]</div>';
+    if (lname === 'divider') return '<hr style="border:none;border-top:1px solid ' + H_BORDER + ';margin:6px 0;width:100%"/>';
+    if (lname === 'icon') { const nm = cVal(attrs, 'name', scope) || 'dot'; const sz = { xs: 12, sm: 14, md: 16, lg: 22, xl: 28, '2xl': 34 }[cVal(attrs, 'size', scope)] || 16; return resolveIcon(nm, sz, cColor(cVal(attrs, 'color', scope))); }
+    if (lname === 'badge') { const col = cColor(cVal(attrs, 'color', scope) || 'secondary'); return '<span style="display:inline-block;border:1px solid ' + H_BORDER + ';border-radius:999px;padding:1px 8px;font-size:11px;color:' + col + '">' + node.children.map(c => cNode(c, scope)).join('') + '</span>'; }
+    if (lname === 'text' || lname === 'caption') {
+      const st = []; const size = cVal(attrs, 'size', scope); if (size && H_FS[size]) st.push('font-size:' + H_FS[size] + 'px');
+      const w = cVal(attrs, 'weight', scope); if (w && H_FW[w]) st.push('font-weight:' + H_FW[w]);
+      const col = cVal(attrs, 'color', scope); if (col) st.push('color:' + cColor(col));
+      const ta = cVal(attrs, 'textAlign', scope); if (ta) st.push('text-align:' + ta);
+      if (lname === 'caption') { st.push('font-size:' + ((size && H_FS[size]) || 11) + 'px'); st.push('color:' + H_COLOR.secondary); }
+      return '<div style="' + st.join(';') + '">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
     }
-    return md.replace(re, (_, i) => (uris[+i] ? '![ChatGPT diagram](' + uris[+i] + ')' : '_[diagram — see raw source below]_'));
+    if (lname === 'list') return '<div style="display:flex;flex-direction:column;gap:6px;width:100%">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    if (lname === 'list-item') return '<div style="display:flex;gap:8px;align-items:flex-start"><span style="color:' + H_COLOR.tertiary + ';line-height:1.4">•</span><div style="flex:1">' + node.children.map(c => cNode(c, scope)).join('') + '</div></div>';
+    if (lname === 'table') return '<div style="display:flex;flex-direction:column;border:1px solid ' + H_BORDER + ';border-radius:8px;overflow:hidden;width:100%">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    if (lname === 'table-row') return '<div style="display:flex;border-top:1px solid #f0f0f0">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    if (lname === 'table-cell') return '<div style="flex:1;padding:6px 10px">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    const st = ['display:flex'];
+    if (lname === 'row') st.push('flex-direction:row', 'align-items:center');
+    else st.push('flex-direction:column');
+    if (lname === 'grid') { st.length = 0; const cols = +cVal(attrs, 'columns', scope) || 2; st.push('display:grid', 'grid-template-columns:repeat(' + cols + ',1fr)'); }
+    const gap = cSpacing(cRawVal(attrs, 'gap', scope)); if (gap) st.push('gap:' + gap);
+    const pad = cSpacing(cRawVal(attrs, 'padding', scope)); if (pad) st.push('padding:' + pad);
+    const align = cVal(attrs, 'align', scope); if (align) st.push('align-items:' + cFlexA(align));
+    const justify = cVal(attrs, 'justify', scope); if (justify) st.push('justify-content:' + cFlexJ(justify));
+    const flex = cVal(attrs, 'flex', scope); if (flex) st.push('flex:' + flex);
+    const width = cVal(attrs, 'width', scope); if (width) st.push('width:' + width);
+    const height = cVal(attrs, 'height', scope); if (height && height !== '100%') st.push('height:' + height);
+    const bg = cVal(attrs, 'background', scope); if (bg) st.push('background:' + (H_BG[bg] || bg));
+    const radius = cVal(attrs, 'radius', scope); if (radius) st.push('border-radius:' + (H_RADIUS[radius] || 8) + 'px');
+    cBorder(attrs.border, scope, st);
+    return '<div style="' + st.join(';') + '">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+  }
+  // Serialise a parsed child back to source (used to re-tokenise a nested <svg>).
+  function cRawChild(node) {
+    if (node.type === 'text') return node.value;
+    if (node.type === 'expr') return '{' + node.expr + '}';
+    if (node.type === 'each') return '{#each ' + node.expr + ' as ' + node.var + (node.idx ? ',' + node.idx : '') + '}' + node.children.map(cRawChild).join('') + '{/each}';
+    if (node.type === 'if') return '{#if ' + node.expr + '}' + node.children.map(cRawChild).join('') + '{/if}';
+    if (node.type === 'el') return '<' + node.name + (node.attrs ? ' ' + node.attrs : '') + '>' + node.children.map(cRawChild).join('') + '</' + node.name + '>';
+    return '';
+  }
+  function cRender(markup) {
+    try { return cNode(svgBuildTree(svgTokenize(markup)), {}); }
+    catch (e) { return null; }
+  }
+  // Rasterise reconstructed HTML to a PNG data URI via <foreignObject> + canvas.
+  function htmlToPng(html, width) {
+    return new Promise(resolve => {
+      try {
+        const probe = document.createElement('div');
+        probe.style.cssText = 'position:fixed;left:-99999px;top:0;width:' + width + 'px;background:#fff;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:12px';
+        probe.innerHTML = html;
+        document.body.appendChild(probe);
+        const h = Math.ceil(probe.getBoundingClientRect().height) + 4;
+        document.body.removeChild(probe);
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + h + '"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:' + width + 'px;background:#fff;color:#111827;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:12px">' + html + '</div></foreignObject></svg>';
+        const img = new Image();
+        img.onload = () => { try { const sc = 2; const cv = document.createElement('canvas'); cv.width = width * sc; cv.height = h * sc; const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height); resolve(cv.toDataURL('image/png')); } catch (e) { resolve(null); } };
+        img.onerror = () => resolve(null);
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  // Replace SVG and box/grid sentinels in the built Markdown with embedded PNGs.
+  async function embedImages(md) {
+    let out = md;
+    const svgRe = /(\d+)/g;
+    const svgUris = {};
+    for (const id of [...out.matchAll(svgRe)].map(m => +m[1])) { if (svgUris[id] !== undefined) continue; const s = renderSvgString(svgSources[id] || ''); svgUris[id] = s ? await svgToPng(s, 2) : null; }
+    out = out.replace(svgRe, (_, i) => (svgUris[+i] ? '![ChatGPT diagram](' + svgUris[+i] + ')' : '_[diagram — see raw source below]_'));
+    const cRe = /(\d+)/g;
+    const cUris = {};
+    for (const id of [...out.matchAll(cRe)].map(m => +m[1])) { if (cUris[id] !== undefined) continue; const h = cRender(componentSources[id] || ''); cUris[id] = h ? await htmlToPng(h, 640) : null; }
+    out = out.replace(cRe, (_, i) => (cUris[+i] ? '![ChatGPT visual](' + cUris[+i] + ')' : '_[visual — see raw source below]_'));
+    return out;
   }
 
   // Turn a message's content object into Markdown text.
@@ -913,9 +1068,11 @@ function setupChatGPTExporter() {
         throw new Error('No messages found in the conversation payload.');
       }
 
-      // Rasterise any inline SVG diagrams to PNGs embedded in the Markdown.
-      if (svgSources.length) setStatus(`Rendering ${svgSources.length} diagram(s)...`);
-      const markdown = await embedSvgImages(rawMarkdown);
+      // Rasterise inline SVG diagrams and reconstructed card/grid layouts to
+      // PNGs embedded directly in the Markdown.
+      const nImg = svgSources.length + componentSources.length;
+      if (nImg) setStatus(`Rendering ${nImg} visual(s)...`);
+      const markdown = await embedImages(rawMarkdown);
 
       const filename = getFilename(data);
       downloadMarkdown(markdown, filename);
