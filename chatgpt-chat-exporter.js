@@ -402,6 +402,10 @@ function setupChatGPTExporter() {
         start = -1;
       }
     }
+    // Truncated markup (a message cut off mid-component during generation) leaves
+    // a region open: capture it to end-of-text so it is still rendered as a visual
+    // instead of leaking its raw tags into the prose.
+    if (start >= 0 && depth > 0) regions.push([start, text.length]);
     if (!regions.length) return text;
     let out = text;
     for (let i = regions.length - 1; i >= 0; i--) {
@@ -447,6 +451,11 @@ function setupChatGPTExporter() {
   function cleanComponents(text) {
     if (!text) return text;
     if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|list|svg|Entity|Cite|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b|\{#(?:each|if)\b/i.test(text)) return text;
+
+    // Drop a dangling, unterminated component/SVG tag at the very end — a message
+    // cut off mid-tag during generation would otherwise leak "<text" into the
+    // output (its region is still recovered by wrapDiagrams' end-of-text capture).
+    text = text.replace(/<\/?(?:box|row|col|column|grid|grid-item|stack|card|text|caption|section|container|spacer|divider|group|list|list-item|table|table-row|table-cell|badge|icon|svg|rect|path|circle|line|g|Entity|Cite|(?:Async)?Image(?:Group)?)(?:\s[^<>]*)?$/i, '');
 
     // Protect code spans/blocks and (later) generated tables/lists from the
     // whitespace normalisation that follows.
@@ -799,7 +808,11 @@ function setupChatGPTExporter() {
         const fontCss = "text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}";
         let s = svgString
           .replace(/^<svg\b([^>]*)>/i, (m0, a) => '<svg' + a.replace(/\swidth="[^"]*"/i, '').replace(/\sheight="[^"]*"/i, '') + ' width="' + w + '" height="' + h + '"><style>' + fontCss + '</style>')
-          .replace(/currentColor/g, '#4b5563');
+          // currentColor in these diagrams = the page's (near-black) text colour,
+          // used for text with no explicit fill and for faint connectors (whose
+          // strokeOpacity does the lightening). Grey-600 was too light for both;
+          // #111827 matches the chat and the box/grid card images.
+          .replace(/currentColor/g, '#111827');
         if (!/xmlns=/.test(s.slice(0, 120))) s = s.replace(/^<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
         const img = new Image();
         img.onload = () => {
@@ -903,8 +916,14 @@ function setupChatGPTExporter() {
       if (lname === 'caption') { st.push('font-size:' + ((size && H_FS[size]) || 11) + 'px'); st.push('color:' + H_COLOR.secondary); }
       return '<div style="' + st.join(';') + '">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
     }
-    if (lname === 'list') return '<div style="display:flex;flex-direction:column;gap:6px;width:100%">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
-    if (lname === 'list-item') return '<div style="display:flex;gap:8px;align-items:flex-start"><span style="color:' + H_COLOR.tertiary + ';line-height:1.4">•</span><div style="flex:1">' + node.children.map(c => cNode(c, scope)).join('') + '</div></div>';
+    if (lname === 'list') {
+      // Honour marker="number" (ordered) vs the default bullets; a real <ol>/<ul>
+      // lets the browser number items correctly even across {#each} expansion.
+      const numbered = /number|ordered|decimal/i.test(cVal(attrs, 'marker', scope) || '');
+      const tag = numbered ? 'ol' : 'ul';
+      return '<' + tag + ' style="margin:4px 0;padding-left:24px;line-height:1.4">' + node.children.map(c => cNode(c, scope)).join('') + '</' + tag + '>';
+    }
+    if (lname === 'list-item') return '<li style="margin:5px 0;line-height:1.4">' + node.children.map(c => cNode(c, scope)).join('') + '</li>';
     if (lname === 'table') return '<div style="display:flex;flex-direction:column;border:1px solid ' + H_BORDER + ';border-radius:8px;overflow:hidden;width:100%">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
     if (lname === 'table-row') return '<div style="display:flex;border-top:1px solid #f0f0f0">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
     if (lname === 'table-cell') return '<div style="flex:1;padding:6px 10px">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
