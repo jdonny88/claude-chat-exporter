@@ -142,14 +142,47 @@ their messages.
 - **Rich-content tokens** - ChatGPT's inline web-search citation chips are stripped; image carousels become `_[Images]_` and product cards `_[Product: name]_`
 - **Rich UI components** - Newer responses embed a small JSX + Handlebars-like layout language inside the message text (`<box>`, `<row>`, `<grid>`, `<grid-item>`, `<text>`, `<caption>`, `<badge>`, `<table>`, `<list>`, and `{#each}`/`{#if}` template loops over inline data). The exporter reconstructs these as clean Markdown rather than dumping the raw markup:
   - `{#each … as x} … {/each}` loops are expanded over their inline data (arrays of objects or arrays), including an optional index variable and `{#if}` conditionals
-  - `<table>` becomes a Markdown table; `<list>` becomes a Markdown (numbered/bulleted) list
-  - multi-column `<grid>` card grids become a Markdown table too, so parallel cards stay side by side (each card's title/subtitle/caption stacked in its cell) instead of flattening into a vertical list that loses the "these are siblings" structure
-  - single-column boxes/stacks keep each label and value on its own line (no more mashing), with `<text weight=…>` labels kept as **bold** and captions/badges as their own lines
+  - standalone `<table>` becomes a Markdown table; a standalone `<list>` becomes a Markdown (numbered/bulleted) list
   - image carousels become `_[Images]_` and single images `_[Image]_`
-  - directional icons in flow diagrams render as arrow glyphs (`↓ ↑ → ←`) so the flow survives; other icons are dropped; `<Cite>` chips are stripped
+  - directional icons in flow diagrams render as arrow glyphs (`↓ ↑ → ←`) so the flow survives; `<Cite>` chips are stripped
+  - **rich card/grid layouts and inline SVG diagrams are embedded as images** — the visually meaningful blocks (card grids, nested frames, connector flows, triangles) carry structure in their colours, nesting and icons that a flat table would lose, so they are reconstructed and rasterised to a **PNG embedded directly in the Markdown as a `data:` URI**:
+    - `<box>`/`<grid>`/`<card>`/`<stack>` card layouts are rebuilt as HTML (colours, nesting, dividers, badges, columns preserved) and drawn to a PNG; **Lucide icons are cloned from the ChatGPT page when the script runs there**, with a built-in icon set as the fallback
+    - inline `<svg>` diagrams are reconstructed (templates expanded, JSX-style expressions evaluated with a no-`eval` parser so the page's CSP never blocks it, camelCase attributes fixed) and drawn to a PNG
+    - rasterising runs entirely in your browser via a `<canvas>` (no library, no network), so the picture travels with the single `.md` file into Obsidian, PDF and e-readers with no sidecar files
   - each reconstructed block is wrapped in `**⟦ ChatGPT visual block … ⟧**` / `**⟦ end of visual block ⟧**` markers, so you can tell where a flattened diagram/layout begins and ends instead of it bleeding into the surrounding prose (ordinary prose and normal Markdown tables are not marked)
   - **the exact raw layout source is preserved** inside each visual block, in a collapsible `<details>Raw layout source</details>` section. Flattening a complex 2D diagram to Markdown necessarily loses some structure (nesting, grouping, connectors, left-to-right relationships); keeping the verbatim source means nothing is lost — it's the full-fidelity master the original picture renders from, so the diagram can be re-created from it later
 - **Endpoint churn** - If OpenAI renames the backend endpoints, the constants above need updating
+
+## Design notes: built to survive an evolving component language
+
+ChatGPT's rich-visual layout language is new and clearly still growing. The
+reconstruction is deliberately **structure-driven rather than keyed to a fixed
+list of tag names**, so it keeps working as that vocabulary expands:
+
+- **Containers are identified by exclusion, not enumeration.** A small set of
+  inline/leaf tags (`text`, `caption`, `badge`, `icon`, `divider`, `list`,
+  `table`, …) is known; *every other* paired element is treated as a layout
+  container. A brand-new tag (say `<panel>` or `<callout>`) is detected as a
+  visual region and rendered by the generic container path with no code change.
+- **Whether a block becomes a picture is decided by shape, not by name** — a
+  region is rasterised when it contains an SVG, a styled frame (background /
+  border / radius), a grid, an icon, or nested containers; a plain wrapper of
+  text just flattens to Markdown. New container tags inherit this automatically.
+- **Attributes are interpreted generically.** Spacing, colour, radius, font
+  size/weight, alignment and column counts are read from their attributes and
+  mapped to CSS; unknown values fall back sensibly. Any container declaring a
+  column count (not only `<grid>`) lays out as a grid.
+- **Graceful degradation is the default.** Unknown icons fall back (after trying
+  to clone the page's real Lucide icon); an unknown tag still renders its content
+  and styling; a message **truncated mid-generation** is recovered (the open
+  region is captured, the dangling tag dropped, empty cells omitted) instead of
+  leaking raw markup; and if anything fails to rasterise, the block degrades to a
+  placeholder with its **raw source preserved** below it.
+
+The practical upshot: when ChatGPT ships a new kind of visual, the exporter
+should render a faithful-enough picture of it on day one, and the verbatim raw
+source is always kept so nothing is ever lost even if the reconstruction isn't
+perfect.
 
 ## Privacy & Security
 

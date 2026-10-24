@@ -340,13 +340,41 @@ function setupChatGPTExporter() {
     return lines.join('<br>');
   }
 
+  // Convert the inline components inside a single list item / table cell to inline
+  // Markdown, kept on one line (bold labels, badges, entity values, arrow glyphs),
+  // so a bulleted item like "**Yellow tables** — commonly the default" stays intact
+  // instead of leaving raw <text> tags or breaking onto separate lines.
+  function inlineClean(s) {
+    return s
+      .replace(/<[A-Za-z][\w.-]*\b[^>]*?\bvalue=(?:"([^"]*)"|'([^']*)'|\{`?([^}`]*)`?\})[^>]*?\/>/g, (_, a, b, c) => a ?? b ?? c ?? '')
+      .replace(/<(?:Async)?ImageGroup\b[^>]*>/gi, '_[Images]_')
+      .replace(/<(?:Async)?Image\b[^>]*>/gi, '_[Image]_')
+      .replace(/<Cite\b[^>]*>/gi, '')
+      .replace(/<icon\b[^>]*?\bname=(?:"([^"]*)"|'([^']*)')[^>]*>/gi, (_, a, b) => iconGlyph(a ?? b))
+      .replace(/<icon\b[^>]*>/gi, '')
+      .replace(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi, (_, at, inner) => {
+        const x = inner.replace(/\s+/g, ' ').trim();
+        if (!x) return '';
+        return /weight\s*=\s*"?(?:medium|semibold|bold)/i.test(at) ? '**' + x + '**' : x;
+      })
+      .replace(/<caption\b[^>]*>([\s\S]*?)<\/caption>/gi, (_, inner) => inner.replace(/\s+/g, ' ').trim())
+      .replace(/<badge\b[^>]*>([\s\S]*?)<\/badge>/gi, (_, inner) => { const x = inner.replace(/\s+/g, ' ').trim(); return x ? '_' + x + '_' : ''; })
+      .replace(/<\/?[A-Za-z][\w.-]*(?:\s[^<>]*?)?\/?>/g, ' ')
+      .replace(/[ \t]+/g, ' ').trim();
+  }
+
   const DIAGRAM_START = '**⟦ ChatGPT visual block — flattened from a rich layout ⟧**';
   const DIAGRAM_END = '**⟦ end of visual block ⟧**';
 
-  // Paired, block-level component tags. Inline/self-closing ones (<Entity/>,
-  // <AsyncImage/>, <Cite/>, <icon/>, <divider/>) are NOT here, so a citation or
-  // entity sitting in ordinary prose never looks like the start of a diagram.
-  const BLOCK_TAG = /^(?:box|row|col|column|grid|grid-item|stack|card|text|caption|section|container|spacer|group|list|list-item|table|table-row|table-cell|badge)$/i;
+  // Rather than enumerate every layout container (which couples us to ChatGPT's
+  // current tag vocabulary), we define the SMALL set of tags that are NOT layout
+  // regions — inline/leaf content and the simple list/table tags that flatten to
+  // Markdown — and treat every other paired element as a potential visual
+  // container. A new container tag ChatGPT introduces (e.g. <panel>, <callout>)
+  // is then handled with no code change: it's detected as a region and rendered
+  // by cEl's generic container path.
+  const NON_REGION_TAGS = /^(?:text|caption|badge|icon|divider|spacer|entity|cite|link|a|b|i|em|strong|code|span|br|small|sub|sup|mark|u|s|del|ins|abbr|kbd|img|image|asyncimage|asyncimagegroup|imagegroup|list|list-item|table|table-row|table-cell)$/i;
+  const isRegionContainer = n => !!n && !NON_REGION_TAGS.test(n);
 
   // Wrap each top-level rich-component region (a diagram / card grid / flow laid
   // out visually in the chat) with start/end markers, so a reader can tell where
@@ -366,10 +394,10 @@ function setupChatGPTExporter() {
         delta = 0;                                   // self-closing: no nesting
       } else if (tok[1] === '/') {
         const name = tok.slice(2).match(/[A-Za-z][\w.-]*/);
-        if (name && BLOCK_TAG.test(name[0])) delta = -1;
+        if (name && isRegionContainer(name[0])) delta = -1;
       } else {
         const name = tok.slice(1).match(/[A-Za-z][\w.-]*/);
-        if (name && BLOCK_TAG.test(name[0])) delta = 1;
+        if (name && isRegionContainer(name[0])) delta = 1;
       }
       if (delta > 0 && depth === 0) start = m.index;
       depth += delta;
@@ -379,15 +407,44 @@ function setupChatGPTExporter() {
         start = -1;
       }
     }
+    // Truncated markup (a message cut off mid-component during generation) leaves
+    // a region open: capture it to end-of-text so it is still rendered as a visual
+    // instead of leaking its raw tags into the prose.
+    if (start >= 0 && depth > 0) regions.push([start, text.length]);
     if (!regions.length) return text;
     let out = text;
     for (let i = regions.length - 1; i >= 0; i--) {
       const [s, e] = regions[i];
-      // Preserve the exact raw markup (the lossless master the picture renders
-      // from) and re-emit it as a source block right before the end marker.
-      const idx = rawBlocks.push(text.slice(s, e)) - 1;
-      out = out.slice(0, e) + `\n\n${idx}\n\n${DIAGRAM_END}\n\n` + out.slice(e);
-      out = out.slice(0, s) + `\n\n${DIAGRAM_START}\n\n` + out.slice(s);
+      const region = text.slice(s, e);
+      const hasSvg = /<svg[\s>]/i.test(region);
+      // "Rich" = worth rendering as a picture: an SVG, a styled frame, a grid, an
+      // icon, or a nested container. A lone unstyled wrapper of plain text is not
+      // (it flattens to normal Markdown). Counted structurally, not by tag name,
+      // so this keeps working as ChatGPT's component vocabulary grows.
+      const containerOpens = (region.match(/<(?!\/)[A-Za-z][\w-]*(?:\s[^<>]*?)?>/g) || []).filter(tg => {
+        if (/\/>\s*$/.test(tg)) return false;
+        const nm = (tg.match(/<([A-Za-z][\w-]*)/) || [])[1];
+        return nm && isRegionContainer(nm) && !/^(?:svg|rect|path|circle|line|g|text|tspan|defs|marker|polygon|polyline|ellipse|clippath|lineargradient|radialgradient|stop|use|foreignobject)$/i.test(nm);
+      }).length;
+      const rich = hasSvg
+        || /\b(?:background|border|radius)\s*=/i.test(region)
+        || /<icon\b|<grid\b/i.test(region)
+        || containerOpens >= 2;
+      if (!rich) continue;
+      // Preserve the exact raw markup (the lossless master) as a source block.
+      const idx = rawBlocks.push(region) - 1;
+      if (!hasSvg) {
+        // A card / grid layout: reconstruct the whole thing as an embedded image.
+        const cidx = componentSources.push(region) - 1;
+        out = out.slice(0, s)
+          + `\n\n${DIAGRAM_START}\n\n\uE342${cidx}\uE343\n\n\uE330${idx}\uE331\n\n${DIAGRAM_END}\n\n`
+          + out.slice(e);
+      } else {
+        // SVG region: the <svg> itself is swapped for an image sentinel in the
+        // next step; just bracket the (flattened) surrounding text with markers.
+        out = out.slice(0, e) + `\n\n\uE330${idx}\uE331\n\n${DIAGRAM_END}\n\n` + out.slice(e);
+        out = out.slice(0, s) + `\n\n${DIAGRAM_START}\n\n` + out.slice(s);
+      }
     }
     return out;
   }
@@ -402,9 +459,30 @@ function setupChatGPTExporter() {
     return `<details><summary>Raw layout source (re-renderable)</summary>\n\n${fence}\n${src}\n${fence}\n\n</details>`;
   }
 
+  // Does this message carry a ChatGPT rich-UI component block? Rather than match
+  // a fixed list of tag names, we look for the shape of the component language —
+  // a template directive, an <svg>, a tag carrying a layout/style attribute, or a
+  // multi-word/hyphenated element tag — so newly-introduced component tags still
+  // trip the gate. (Any genuine code is protected before tags are touched, so a
+  // false positive on prose that merely contains a tag is harmless.)
+  function looksLikeComponents(text) {
+    return /\{#(?:each|if)\b/.test(text)
+      || /<svg[\s>]/i.test(text)
+      || /<[A-Za-z][\w-]*\s[^<>]*\b(?:padding|gap|radius|columns|weight|background|align|justify|marker|size|color|border|flex|width|height|textAnchor|strokeWidth|fontSize|value|query|refs|connector)\s*=/i.test(text)
+      || /<\/?(?:box|row|col|column|grid|grid-item|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|table-row|table-cell|list|list-item|entity|cite|(?:async)?image(?:group)?|panel|callout|chip|pill|tag|tile|banner|note|frame|flex|columns|stack-item)\b/i.test(text)
+      || /<[A-Za-z][\w]*-[\w-]+[\s/>]/.test(text);
+  }
+
   function cleanComponents(text) {
     if (!text) return text;
-    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|list|Entity|Cite|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b|\{#(?:each|if)\b/i.test(text)) return text;
+    if (!looksLikeComponents(text)) return text;
+
+    // Drop a dangling, unterminated tag at the very end — a message cut off
+    // mid-tag during generation would otherwise leak "<text" (or any tag name)
+    // into the output. Matches only an unclosed tag at EOF (no '>' before the
+    // end), so complete tags and ordinary "a < b" prose are untouched; the
+    // region itself is still recovered by wrapDiagrams' end-of-text capture.
+    text = text.replace(/<\/?[A-Za-z][\w-]*(?:\s[^<>]*)?$/, '');
 
     // Protect code spans/blocks and (later) generated tables/lists from the
     // whitespace normalisation that follows.
@@ -419,6 +497,14 @@ function setupChatGPTExporter() {
     //     and stash its raw markup to re-emit as a source block at the end.
     t = wrapDiagrams(t, rawBlocks);
 
+    // 0c. Replace each inline <svg> with a sentinel (rasterised to an embedded
+    //     PNG after the document is built). The surrounding box title/caption
+    //     still flatten to text; only the drawing becomes an image.
+    t = t.replace(/<svg\b[\s\S]*?<\/svg>/gi, m => {
+      const svg = m.replace(/(\d+)/g, (_, i) => code[+i]);
+      return `\n\n${svgSources.push(svg) - 1}\n\n`;
+    });
+
     // 1. Expand {#each}/{#if} templates into concrete markup.
     t = expandTemplates(t);
 
@@ -426,7 +512,7 @@ function setupChatGPTExporter() {
     t = t.replace(/<table\b[^>]*>([\s\S]*?)<\/table>/gi, (_, body) => {
       const rows = [...body.matchAll(/<table-row\b[^>]*>([\s\S]*?)<\/table-row>/gi)].map(r =>
         [...r[1].matchAll(/<table-cell\b[^>]*>([\s\S]*?)<\/table-cell>/gi)]
-          .map(c => c[1].replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|')));
+          .map(c => inlineClean(c[1]).replace(/\|/g, '\\|')));
       if (!rows.length) return '';
       const ncol = Math.max(...rows.map(r => r.length));
       const line = cells => '| ' + cells.concat(Array(ncol - cells.length).fill('')).join(' | ') + ' |';
@@ -455,20 +541,13 @@ function setupChatGPTExporter() {
     // 3. Convert <list> -> Markdown list (protected block).
     t = t.replace(/<list\b([^>]*)>([\s\S]*?)<\/list>/gi, (_, attrs, body) => {
       const numbered = /marker\s*=\s*"?number/i.test(attrs);
-      const items = [...body.matchAll(/<list-item\b[^>]*>([\s\S]*?)<\/list-item>/gi)].map(x => x[1]);
-      if (!items.length) return '';
+      const items = [...body.matchAll(/<list-item\b[^>]*>([\s\S]*?)<\/list-item>/gi)].map(x => inlineClean(x[1]));
+      if (!items.filter(Boolean).length) return '';
       let n = 0;
       const md = items.map(it => {
         n++;
-        const marker = numbered ? `${n}. ` : '- ';
-        const indent = ' '.repeat(marker.length);
-        const lines = it.replace(/^\s*\n|\s+$/g, '').split('\n');
-        return lines.map((ln, i) => {
-          const s = ln.trim();
-          if (i === 0) return marker + s;
-          return s ? indent + s : '';
-        }).join('\n');
-      }).join('\n\n');
+        return (numbered ? `${n}. ` : '- ') + it;
+      }).join('\n');
       blocks.push(md);
       return `\n\n${blocks.length - 1}\n\n`;
     });
@@ -551,6 +630,429 @@ function setupChatGPTExporter() {
     });
     out = out.replace(/[-]/g, '');           // sweep stray delimiters
     out = out.replace(/ +\n/g, '\n').replace(/\n{3,}/g, '\n\n'); // tidy whitespace
+    return out;
+  }
+
+  // --- Rich-diagram SVG -> embedded PNG ------------------------------------
+  // The most visually-rich ChatGPT diagrams are inline SVG. Flattening them to
+  // text loses the picture, so instead we reconstruct the SVG (expand {#each},
+  // evaluate the JSX-style expressions, fix camelCase attributes) and rasterise
+  // it to a PNG data URI embedded directly in the Markdown — so the diagram
+  // survives into a PDF / e-reader without any sidecar files. cleanComponents
+  // replaces each <svg> with a sentinel and stashes its markup here; the images
+  // are produced after the whole document is built (rasterising needs the DOM).
+  const svgSources = [];
+
+  const SVG_KEBAB = {
+    fontSize: 'font-size', fontWeight: 'font-weight', fontFamily: 'font-family',
+    textAnchor: 'text-anchor', strokeWidth: 'stroke-width', strokeOpacity: 'stroke-opacity',
+    strokeDasharray: 'stroke-dasharray', strokeLinecap: 'stroke-linecap',
+    strokeLinejoin: 'stroke-linejoin', fillOpacity: 'fill-opacity',
+    strokeDashoffset: 'stroke-dashoffset', dominantBaseline: 'dominant-baseline'
+  };
+
+  function svgMatchBrace(s, i) {
+    let d = 0;
+    for (let k = i; k < s.length; k++) {
+      const c = s[k];
+      if (c === '"' || c === "'") { const q = c; k++; while (k < s.length && s[k] !== q) { if (s[k] === '\\') k++; k++; } continue; }
+      if (c === '`') { k++; while (k < s.length && s[k] !== '`') { if (s[k] === '\\') k++; else if (s[k] === '$' && s[k + 1] === '{') { let dd = 1; k += 2; while (k < s.length && dd > 0) { if (s[k] === '{') dd++; else if (s[k] === '}') dd--; k++; } continue; } k++; } continue; }
+      if (c === '{' || c === '[') d++;
+      else if (c === '}' || c === ']') { d--; if (d === 0) return k; }
+    }
+    return s.length;
+  }
+  // Evaluate a JSX-style expression ({o.x+51}, ternaries, template literals,
+  // array/object literals, .split()/.slice()/.join()) against the current loop
+  // scope. A real parser, NOT new Function/eval — ChatGPT's page CSP forbids
+  // eval, and this is also safer (no code execution, just data).
+  const SVG_BINOP = { '||': 1, '&&': 2, '===': 3, '!==': 3, '==': 3, '!=': 3, '<': 4, '>': 4, '<=': 4, '>=': 4, '+': 5, '-': 5, '*': 6, '/': 6, '%': 6 };
+  function svgLex(s) {
+    const toks = []; let i = 0;
+    const ops = ['===', '!==', '==', '!=', '<=', '>=', '&&', '||', '<', '>', '+', '-', '*', '/', '%', '!', '?'];
+    while (i < s.length) {
+      const c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (c === '`') {
+        i++; const parts = []; let buf = '';
+        while (i < s.length && s[i] !== '`') {
+          if (s[i] === '$' && s[i + 1] === '{') { parts.push({ str: buf }); buf = ''; i += 2; let d = 1, e = ''; while (i < s.length && d > 0) { if (s[i] === '{') d++; else if (s[i] === '}') { d--; if (d === 0) break; } e += s[i]; i++; } i++; parts.push({ expr: e }); }
+          else { buf += s[i]; i++; }
+        }
+        i++; parts.push({ str: buf }); toks.push({ type: 'tmpl', parts }); continue;
+      }
+      if (c === '"' || c === "'") { const q = c; i++; let v = ''; while (i < s.length && s[i] !== q) { if (s[i] === '\\') { v += s[i + 1]; i += 2; } else { v += s[i]; i++; } } i++; toks.push({ type: 'str', value: v }); continue; }
+      if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(s[i + 1] || ''))) { let v = ''; while (i < s.length && /[0-9.]/.test(s[i])) { v += s[i]; i++; } toks.push({ type: 'num', value: parseFloat(v) }); continue; }
+      if (/[A-Za-z_$]/.test(c)) { let v = ''; while (i < s.length && /[\w$]/.test(s[i])) { v += s[i]; i++; } toks.push({ type: 'name', value: v }); continue; }
+      let m = false;
+      for (const op of ops) { if (s.startsWith(op, i)) { toks.push({ type: 'op', value: op }); i += op.length; m = true; break; } }
+      if (m) continue;
+      if ('()[]{}.,:'.indexOf(c) >= 0) { toks.push({ type: 'punct', value: c }); i++; continue; }
+      i++;
+    }
+    return toks;
+  }
+  function svgParse(s) {
+    const toks = svgLex(s); let p = 0;
+    const peek = () => toks[p], eat = () => toks[p++];
+    const expect = v => { const t = eat(); if (!t || t.value !== v) throw new Error('expected ' + v); };
+    function prim() {
+      const t = peek(); if (!t) throw new Error('eof');
+      if (t.type === 'num') { eat(); return { t: 'lit', v: t.value }; }
+      if (t.type === 'str') { eat(); return { t: 'lit', v: t.value }; }
+      if (t.type === 'tmpl') { eat(); return { t: 'tmpl', parts: t.parts.map(x => x.expr !== undefined ? { e: svgParse(x.expr) } : { s: x.str }) }; }
+      if (t.type === 'name') { eat(); if (t.value === 'true') return { t: 'lit', v: true }; if (t.value === 'false') return { t: 'lit', v: false }; if (t.value === 'null') return { t: 'lit', v: null }; if (t.value === 'undefined') return { t: 'lit', v: undefined }; return { t: 'var', n: t.value }; }
+      if (t.type === 'punct' && t.value === '(') { eat(); const e = tern(); expect(')'); return e; }
+      if (t.type === 'punct' && t.value === '[') { eat(); const items = []; if (!(peek() && peek().value === ']')) { items.push(tern()); while (peek() && peek().value === ',') { eat(); items.push(tern()); } } expect(']'); return { t: 'arr', items }; }
+      if (t.type === 'punct' && t.value === '{') { eat(); const props = []; if (!(peek() && peek().value === '}')) { do { const k = eat(); expect(':'); props.push({ k: k.value, v: tern() }); } while (peek() && peek().value === ',' && eat()); } expect('}'); return { t: 'obj', props }; }
+      throw new Error('unexpected');
+    }
+    function post() {
+      let e = prim();
+      for (; ;) { const t = peek(); if (t && t.type === 'punct' && t.value === '.') { eat(); const n = eat(); e = { t: 'mem', o: e, p: n.value, c: false }; } else if (t && t.type === 'punct' && t.value === '[') { eat(); const idx = tern(); expect(']'); e = { t: 'mem', o: e, p: idx, c: true }; } else if (t && t.type === 'punct' && t.value === '(') { eat(); const args = []; if (!(peek() && peek().value === ')')) { args.push(tern()); while (peek() && peek().value === ',') { eat(); args.push(tern()); } } expect(')'); e = { t: 'call', f: e, args }; } else break; }
+      return e;
+    }
+    function unary() { const t = peek(); if (t && t.type === 'op' && (t.value === '-' || t.value === '!')) { eat(); return { t: 'un', op: t.value, a: unary() }; } return post(); }
+    function bin(minp) { let left = unary(); for (; ;) { const t = peek(); if (!t || t.type !== 'op' || !(t.value in SVG_BINOP)) break; const pr = SVG_BINOP[t.value]; if (pr < minp) break; eat(); const right = bin(pr + 1); left = { t: 'bin', op: t.value, l: left, r: right }; } return left; }
+    function tern() { const c = bin(1); const t = peek(); if (t && t.type === 'op' && t.value === '?') { eat(); const a = tern(); expect(':'); const b = tern(); return { t: 'tern', c, a, b }; } return c; }
+    return tern();
+  }
+  function svgEvalAst(node, scope) {
+    switch (node.t) {
+      case 'lit': return node.v;
+      case 'var': return scope[node.n];
+      case 'tmpl': return node.parts.map(x => x.s !== undefined ? x.s : String(svgEvalAst(x.e, scope) ?? '')).join('');
+      case 'arr': return node.items.map(i => svgEvalAst(i, scope));
+      case 'obj': { const o = {}; for (const pr of node.props) o[pr.k] = svgEvalAst(pr.v, scope); return o; }
+      case 'mem': { const o = svgEvalAst(node.o, scope); const k = node.c ? svgEvalAst(node.p, scope) : node.p; return o == null ? undefined : o[k]; }
+      case 'call': { const f = node.f; if (f.t === 'mem') { const o = svgEvalAst(f.o, scope); const fn = o == null ? null : o[f.p]; const args = node.args.map(a => svgEvalAst(a, scope)); return typeof fn === 'function' ? fn.apply(o, args) : undefined; } return undefined; }
+      case 'un': { const a = svgEvalAst(node.a, scope); return node.op === '-' ? -a : !a; }
+      case 'bin': {
+        const l = svgEvalAst(node.l, scope), r = svgEvalAst(node.r, scope);
+        switch (node.op) { case '+': return l + r; case '-': return l - r; case '*': return l * r; case '/': return l / r; case '%': return l % r; case '===': return l === r; case '!==': return l !== r; case '==': return l == r; case '!=': return l != r; case '<': return l < r; case '>': return l > r; case '<=': return l <= r; case '>=': return l >= r; case '&&': return l && r; case '||': return l || r; }
+        return undefined;
+      }
+      case 'tern': return svgEvalAst(node.c, scope) ? svgEvalAst(node.a, scope) : svgEvalAst(node.b, scope);
+    }
+    return '';
+  }
+  function svgEval(expr, scope) {
+    try { return svgEvalAst(svgParse(String(expr)), scope || {}); }
+    catch (e) { return ''; }
+  }
+  function svgTokenize(src) {
+    const toks = []; let i = 0, ts = 0;
+    const flush = e => { const t = src.slice(ts, e); if (t) toks.push({ type: 'text', value: t }); };
+    while (i < src.length) {
+      const c = src[i];
+      if (c === '<' && /[A-Za-z/]/.test(src[i + 1] || '')) {
+        flush(i); let j = i + 1, close = false;
+        if (src[j] === '/') { close = true; j++; }
+        let name = ''; while (j < src.length && /[\w.-]/.test(src[j])) { name += src[j]; j++; }
+        let k = j;
+        while (k < src.length && src[k] !== '>') {
+          if (src[k] === '"' || src[k] === "'") { const q = src[k]; k++; while (k < src.length && src[k] !== q) k++; k++; continue; }
+          if (src[k] === '`') { k++; while (k < src.length && src[k] !== '`') k++; k++; continue; }
+          if (src[k] === '{') { k = svgMatchBrace(src, k) + 1; continue; }
+          k++;
+        }
+        let attrs = src.slice(j, k).trim(); let self = attrs.endsWith('/'); if (self) attrs = attrs.slice(0, -1).trim();
+        toks.push(close ? { type: 'close', name } : { type: 'open', name, attrs, self });
+        i = k + 1; ts = i; continue;
+      }
+      if (c === '{') {
+        if (src.startsWith('{#each', i)) { flush(i); const e = svgMatchBrace(src, i); const m = src.slice(i + 1, e).match(/^#each\s+([\s\S]*?)\s+as\s+(\w+)(?:\s*,\s*(\w+))?\s*$/); toks.push({ type: 'each', expr: m ? m[1] : '[]', var: m ? m[2] : '_it', idx: m ? m[3] : null }); i = e + 1; ts = i; continue; }
+        if (src.startsWith('{/each}', i)) { flush(i); toks.push({ type: 'eachEnd' }); i += 7; ts = i; continue; }
+        if (src.startsWith('{#if', i)) { flush(i); const e = svgMatchBrace(src, i); toks.push({ type: 'if', expr: src.slice(i + 4, e).trim() }); i = e + 1; ts = i; continue; }
+        if (src.startsWith('{/if}', i)) { flush(i); toks.push({ type: 'ifEnd' }); i += 5; ts = i; continue; }
+        flush(i); const e = svgMatchBrace(src, i); toks.push({ type: 'expr', expr: src.slice(i + 1, e) }); i = e + 1; ts = i; continue;
+      }
+      i++;
+    }
+    flush(src.length); return toks;
+  }
+  function svgBuildTree(toks) {
+    const root = { type: 'root', children: [] }; const st = [root]; const top = () => st[st.length - 1];
+    const VOIDS = new Set(['rect', 'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'use', 'stop', 'br']);
+    for (const t of toks) {
+      if (t.type === 'open') { const n = { type: 'el', name: t.name, attrs: t.attrs, children: [] }; top().children.push(n); if (!t.self && !VOIDS.has(t.name.toLowerCase())) st.push(n); }
+      else if (t.type === 'close') { for (let s = st.length - 1; s > 0; s--) { if (st[s].type === 'el' && st[s].name === t.name) { st.length = s; break; } } }
+      else if (t.type === 'each') { const n = { type: 'each', expr: t.expr, var: t.var, idx: t.idx, children: [] }; top().children.push(n); st.push(n); }
+      else if (t.type === 'eachEnd') { for (let s = st.length - 1; s > 0; s--) { if (st[s].type === 'each') { st.length = s; break; } } }
+      else if (t.type === 'if') { const n = { type: 'if', expr: t.expr, children: [] }; top().children.push(n); st.push(n); }
+      else if (t.type === 'ifEnd') { for (let s = st.length - 1; s > 0; s--) { if (st[s].type === 'if') { st.length = s; break; } } }
+      else top().children.push(t);
+    }
+    return root;
+  }
+  function svgParseAttrs(s) {
+    const out = {}; let i = 0;
+    while (i < s.length) {
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (i >= s.length) break;
+      let name = ''; while (i < s.length && /[\w:-]/.test(s[i])) { name += s[i]; i++; }
+      if (!name) { i++; continue; }
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (s[i] === '=') {
+        i++; while (i < s.length && /\s/.test(s[i])) i++;
+        if (s[i] === '"' || s[i] === "'") { const q = s[i]; i++; let v = ''; while (i < s.length && s[i] !== q) { v += s[i]; i++; } i++; out[name] = { kind: 'str', val: v }; }
+        else if (s[i] === '{') { const e = svgMatchBrace(s, i); out[name] = { kind: 'expr', val: s.slice(i + 1, e) }; i = e + 1; }
+        else { let v = ''; while (i < s.length && !/\s/.test(s[i])) { v += s[i]; i++; } out[name] = { kind: 'bare', val: v }; }
+      } else out[name] = { kind: 'flag', val: true };
+    }
+    return out;
+  }
+  function svgWalk(node, scope) {
+    if (node.type === 'root') return node.children.map(c => svgWalk(c, scope)).join('');
+    if (node.type === 'text') return node.value;
+    if (node.type === 'expr') { const v = svgEval(node.expr, scope); return v == null ? '' : String(v); }
+    if (node.type === 'each') { let a = svgEval(node.expr, scope); if (!Array.isArray(a)) a = []; return a.map((it, idx) => { const s2 = Object.assign({}, scope); s2[node.var] = it; if (node.idx) s2[node.idx] = idx; return node.children.map(c => svgWalk(c, s2)).join(''); }).join(''); }
+    if (node.type === 'if') return svgEval(node.expr, scope) ? node.children.map(c => svgWalk(c, scope)).join('') : '';
+    if (node.type === 'el') {
+      const attrs = svgParseAttrs(node.attrs || ''); const parts = [];
+      for (const k in attrs) { const a = attrs[k]; if (a.kind === 'flag') { parts.push(k); continue; } const v = a.kind === 'expr' ? svgEval(a.val, scope) : a.val; parts.push((SVG_KEBAB[k] || k) + '="' + String(v).replace(/"/g, '&quot;') + '"'); }
+      const inner = node.children.map(c => svgWalk(c, scope)).join('');
+      return '<' + node.name + (parts.length ? ' ' + parts.join(' ') : '') + '>' + inner + '</' + node.name + '>';
+    }
+    return '';
+  }
+  // Reconstruct an <svg> string (expanded, attrs fixed) from the stashed markup.
+  function renderSvgString(markup) {
+    try { const s = svgWalk(svgBuildTree(svgTokenize(markup)), {}); const m = s.match(/<svg[\s\S]*<\/svg>/i); return m ? m[0] : null; }
+    catch (e) { return null; }
+  }
+  // Rasterise an SVG string to a PNG data URI via a canvas (in-browser).
+  function svgToPng(svgString, scale) {
+    return new Promise(resolve => {
+      try {
+        const vb = (svgString.match(/viewBox="([^"]+)"/i) || [])[1];
+        let w = 600, h = 400;
+        if (vb) { const p = vb.trim().split(/[\s,]+/).map(Number); if (p.length === 4 && p[2] && p[3]) { w = p[2]; h = p[3]; } }
+        // Force a sans-serif stack: a standalone SVG has no page CSS to inherit,
+        // so <text> without a font-family would fall back to the SVG default
+        // (serif / Times) and look nothing like the chat. A <style> rule beats
+        // any presentation attribute, so all text renders in the system sans.
+        const fontCss = "text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}";
+        let s = svgString
+          .replace(/^<svg\b([^>]*)>/i, (m0, a) => '<svg' + a.replace(/\swidth="[^"]*"/i, '').replace(/\sheight="[^"]*"/i, '') + ' width="' + w + '" height="' + h + '"><style>' + fontCss + '</style>')
+          // currentColor in these diagrams = the page's (near-black) text colour,
+          // used for text with no explicit fill and for faint connectors (whose
+          // strokeOpacity does the lightening). Grey-600 was too light for both;
+          // #111827 matches the chat and the box/grid card images.
+          .replace(/currentColor/g, '#111827');
+        if (!/xmlns=/.test(s.slice(0, 120))) s = s.replace(/^<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const cv = document.createElement('canvas'); cv.width = Math.round(w * scale); cv.height = Math.round(h * scale);
+            const ctx = cv.getContext('2d'); ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
+            ctx.drawImage(img, 0, 0, cv.width, cv.height);
+            resolve(cv.toDataURL('image/png'));
+          } catch (e) { resolve(null); }
+        };
+        img.onerror = () => resolve(null);
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(s);
+      } catch (e) { resolve(null); }
+    });
+  }
+  // --- box/grid layouts -> embedded PNG (reconstructed HTML, rasterised) -----
+  // Card/grid layouts carry meaning in their colours, nesting and icons that a
+  // flat table loses. Reconstruct them as HTML and rasterise to a PNG the same
+  // way as the SVGs — in-browser via an <svg><foreignObject> wrapper drawn to a
+  // canvas (no library, no network). cleanComponents stashes the raw markup
+  // here and emits a sentinel; the images are produced after the doc is built.
+  const componentSources = [];
+
+  const H_RADIUS = { sm: 6, md: 8, lg: 12, xl: 16, full: 999 };
+  const H_FS = { '3xs': 9, '2xs': 10, xs: 11, sm: 13, base: 14, md: 15, lg: 17, xl: 20, '2xl': 26, '3xl': 30 };
+  const H_FW = { normal: 400, medium: 500, semibold: 600, bold: 700 };
+  const H_COLOR = { secondary: '#6b7280', tertiary: '#9ca3af', subtle: '#9ca3af', info: '#3b82f6', success: '#16a34a', caution: '#d97706', danger: '#dc2626', default: '#111827' };
+  const H_BG = { surface: '#ffffff', 'surface-secondary': '#f3f4f6', 'surface-tertiary': '#e9eaed' };
+  const H_BORDER = '#e5e7eb';
+  const ARROW_GLYPH = { 'arrow-down': '↓', 'arrow-up': '↑', 'arrow-right': '→', 'arrow-left': '←', 'arrow-left-right': '↔', 'arrow-up-down': '↕', 'chevron-down': '↓', 'chevron-right': '→' };
+  // Inline fallbacks (24x24 stroke) for the icons these diagrams use.
+  const ICON_FALLBACK = {
+    'database': '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+    'user-round': '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 1 0-16 0"/>',
+    'user': '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    'network': '<rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/>',
+    'monitor': '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+    'activity': '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+    'files': '<path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/>',
+    'layers': '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+    'globe-2': '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+    'git-branch': '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+    'refresh-cw': '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+    'boxes': '<path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19V13l-5-3-4.03 2.92Z"/><path d="M12 13V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10l-5 3Z"/><path d="M7 10V5l5-3 5 3v5"/>',
+    'shapes': '<path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/>',
+    'route': '<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
+    'list-tree': '<path d="M21 12h-8"/><path d="M21 6H8"/><path d="M21 18h-8"/><path d="M3 6v4c0 1.1.9 2 2 2h3"/><path d="M3 10v6c0 1.1.9 2 2 2h3"/>',
+    'hard-drive': '<line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/>',
+    'history': '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+    'workflow': '<rect x="3" y="3" width="8" height="8" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect x="13" y="13" width="8" height="8" rx="2"/>'
+  };
+  function resolveIcon(name, px, col) {
+    if (ARROW_GLYPH[name]) return '<span style="font-size:' + Math.round(px * 0.95) + 'px;color:' + col + ';line-height:1">' + ARROW_GLYPH[name] + '</span>';
+    // Prefer a clone of the page's own rendered icon, so it's an exact match to
+    // the chat. ChatGPT renders icons several ways (inline Lucide <path>s, or an
+    // <svg><use href="#symbol"> sprite reference, or an external /cdn sprite);
+    // we handle each: inline same-document symbols, drop external refs we can't
+    // fetch synchronously here, and only trust a clone that has real geometry —
+    // otherwise fall through to the built-in Lucide-shaped fallback.
+    try {
+      let el = document.querySelector('svg.lucide-' + name + ', svg[class~="lucide-' + name + '"], svg[data-lucide="' + name + '"], svg[data-icon="' + name + '"], svg[data-icon-name="' + name + '"]');
+      if (!el) {
+        const u = document.querySelector('use[href$="#' + name + '"], use[href$="/' + name + '"], use[href$="' + name + '"], use[*|href$="#' + name + '"]');
+        if (u && u.closest) el = u.closest('svg');
+      }
+      if (el) {
+        const c = el.cloneNode(true);
+        c.querySelectorAll('use').forEach(u => {
+          const href = u.getAttribute('href') || u.getAttribute('xlink:href') || '';
+          const id = href.indexOf('#') >= 0 ? href.slice(href.indexOf('#') + 1) : '';
+          const sym = id ? document.getElementById(id) : null;
+          if (sym) u.insertAdjacentHTML('beforebegin', sym.innerHTML);
+          u.remove();
+        });
+        if (c.querySelector('path,circle,rect,line,polygon,polyline,ellipse')) {
+          c.setAttribute('width', px); c.setAttribute('height', px);
+          c.removeAttribute('class'); c.removeAttribute('aria-hidden');
+          // Any currentColor (stroke or fill) in the icon resolves to this.
+          c.style.color = col;
+          return new XMLSerializer().serializeToString(c);
+        }
+      }
+    } catch (e) { /* fall through to built-in fallback */ }
+    const inner = ICON_FALLBACK[name];
+    if (inner) return '<svg xmlns="http://www.w3.org/2000/svg" width="' + px + '" height="' + px + '" viewBox="0 0 24 24" fill="none" stroke="' + col + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' + px + '" height="' + px + '" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4" fill="none" stroke="' + col + '" stroke-width="1.6"/></svg>';
+  }
+
+  function cEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function cVal(attrs, name, scope) { const a = attrs[name]; if (!a) return undefined; if (a.kind === 'expr') return svgEval(a.val, scope); return a.val; }
+  function cRawVal(attrs, name, scope) { const a = attrs[name]; if (!a) return undefined; if (a.kind === 'expr') { const v = a.val.trim(); if (/^\d+$/.test(v)) return +v; return svgEval(a.val, scope); } return a.val; }
+  function cSpacing(v) { if (v == null) return null; if (typeof v === 'number') return v * 4 + 'px'; if (/^\d+$/.test(v)) return (+v * 4) + 'px'; return String(v); }
+  function cColor(v) { return (v && H_COLOR[v]) || (typeof v === 'string' && /^(#|rgb)/.test(v) ? v : H_COLOR.default); }
+  function cFlexA(v) { return v === 'start' ? 'flex-start' : v === 'end' ? 'flex-end' : v; }
+  function cFlexJ(v) { return v === 'between' ? 'space-between' : v === 'start' ? 'flex-start' : v === 'end' ? 'flex-end' : v; }
+  function cBorder(a, scope, st) {
+    if (!a) return;
+    if (a.kind === 'flag' || a.val === true) { st.push('border:1px solid ' + H_BORDER); return; }
+    if (a.kind === 'expr') { const o = svgEval(a.val, scope); if (o && typeof o === 'object') { if (o.top) { st.push('border-top:' + (o.top.size || 1) + 'px solid ' + cColor(o.top.color)); return; } st.push('border:' + (o.size || 1) + 'px solid ' + cColor(o.color)); return; } }
+    st.push('border:1px solid ' + H_BORDER);
+  }
+  function cNode(node, scope) {
+    if (node.type === 'text') {
+      // Keep blank-line-separated paragraphs apart (e.g. a list item's label line
+      // and its explanatory paragraph), matching how the chat lays them out.
+      const paras = node.value.split(/\n[ \t]*\n/).map(seg =>
+        cEsc(seg).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/[ \t]*\n[ \t]*/g, ' ').trim()
+      ).filter(Boolean);
+      return paras.map(pp => '<div style="line-height:1.4;margin:1px 0">' + pp + '</div>').join('');
+    }
+    if (node.type === 'expr') { return cEsc(svgEval(node.expr, scope) ?? ''); }
+    if (node.type === 'each') { let a = svgEval(node.expr, scope); if (!Array.isArray(a)) a = []; return a.map((it, i) => { const s = Object.assign({}, scope); s[node.var] = it; if (node.idx) s[node.idx] = i; return node.children.map(c => cNode(c, s)).join(''); }).join(''); }
+    if (node.type === 'if') { return svgEval(node.expr, scope) ? node.children.map(c => cNode(c, scope)).join('') : ''; }
+    if (node.type === 'el') return cEl(node, scope);
+    if (node.type === 'root') return node.children.map(c => cNode(c, scope)).join('');
+    return '';
+  }
+  function cEl(node, scope) {
+    const lname = node.name.toLowerCase();
+    if (lname === 'svg') return svgWalk(svgBuildTree(svgTokenize('<svg' + (node.attrs ? ' ' + node.attrs : '') + '>' + node.children.map(c => cRawChild(c)).join('') + '</svg>')), scope);
+    const attrs = svgParseAttrs(node.attrs || '');
+    if (lname === 'cite') return '';
+    if (lname === 'entity') return cEsc(cVal(attrs, 'value', scope) || '');
+    if (lname === 'asyncimage' || lname === 'image' || lname === 'asyncimagegroup') return '<div style="border:1px dashed #cbd5e1;border-radius:8px;padding:12px;color:#64748b;font-size:12px;text-align:center">[ image ]</div>';
+    if (lname === 'divider') return '<hr style="border:none;border-top:1px solid ' + H_BORDER + ';margin:6px 0;width:100%"/>';
+    if (lname === 'icon') { const nm = cVal(attrs, 'name', scope) || 'dot'; const sz = { xs: 12, sm: 14, md: 16, lg: 22, xl: 28, '2xl': 34 }[cVal(attrs, 'size', scope)] || 16; return resolveIcon(nm, sz, cColor(cVal(attrs, 'color', scope))); }
+    if (lname === 'badge') { const col = cColor(cVal(attrs, 'color', scope) || 'secondary'); return '<span style="display:inline-block;border:1px solid ' + H_BORDER + ';border-radius:999px;padding:1px 8px;font-size:11px;color:' + col + '">' + node.children.map(c => cNode(c, scope)).join('') + '</span>'; }
+    if (lname === 'text' || lname === 'caption') {
+      const st = []; const size = cVal(attrs, 'size', scope); if (size && H_FS[size]) st.push('font-size:' + H_FS[size] + 'px');
+      const w = cVal(attrs, 'weight', scope); if (w && H_FW[w]) st.push('font-weight:' + H_FW[w]);
+      const col = cVal(attrs, 'color', scope); if (col) st.push('color:' + cColor(col));
+      const ta = cVal(attrs, 'textAlign', scope); if (ta) st.push('text-align:' + ta);
+      if (lname === 'caption') { st.push('font-size:' + ((size && H_FS[size]) || 11) + 'px'); st.push('color:' + H_COLOR.secondary); }
+      return '<div style="' + st.join(';') + '">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    }
+    if (lname === 'list') {
+      // Honour marker="number" (ordered) vs the default bullets; a real <ol>/<ul>
+      // lets the browser number items correctly even across {#each} expansion.
+      const numbered = /number|ordered|decimal/i.test(cVal(attrs, 'marker', scope) || '');
+      const tag = numbered ? 'ol' : 'ul';
+      return '<' + tag + ' style="margin:4px 0;padding-left:24px;line-height:1.4">' + node.children.map(c => cNode(c, scope)).join('') + '</' + tag + '>';
+    }
+    if (lname === 'list-item') return '<li style="margin:5px 0;line-height:1.4">' + node.children.map(c => cNode(c, scope)).join('') + '</li>';
+    if (lname === 'table') return '<div style="display:flex;flex-direction:column;border:1px solid ' + H_BORDER + ';border-radius:8px;overflow:hidden;width:100%">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    if (lname === 'table-row') return '<div style="display:flex;border-top:1px solid #f0f0f0">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    if (lname === 'table-cell') return '<div style="flex:1;padding:6px 10px">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    const st = ['display:flex'];
+    if (lname === 'row') st.push('flex-direction:row', 'align-items:center');
+    else st.push('flex-direction:column');
+    // Any container declaring a column count renders as a grid — not just the
+    // literal <grid> tag — so a future multi-column layout tag still lays out.
+    const ncols = cVal(attrs, 'columns', scope) ?? cVal(attrs, 'count', scope);
+    if (lname === 'grid' || ncols != null) { st.length = 0; const cols = +ncols || 2; st.push('display:grid', 'grid-template-columns:repeat(' + cols + ',1fr)'); }
+    const gap = cSpacing(cRawVal(attrs, 'gap', scope)); if (gap) st.push('gap:' + gap);
+    const pad = cSpacing(cRawVal(attrs, 'padding', scope)); if (pad) st.push('padding:' + pad);
+    const align = cVal(attrs, 'align', scope); if (align) st.push('align-items:' + cFlexA(align));
+    const justify = cVal(attrs, 'justify', scope); if (justify) st.push('justify-content:' + cFlexJ(justify));
+    const flex = cVal(attrs, 'flex', scope); if (flex) st.push('flex:' + flex);
+    const width = cVal(attrs, 'width', scope); if (width) st.push('width:' + width);
+    const height = cVal(attrs, 'height', scope); if (height && height !== '100%') st.push('height:' + height);
+    const bg = cVal(attrs, 'background', scope); if (bg) st.push('background:' + (H_BG[bg] || bg));
+    const radius = cVal(attrs, 'radius', scope); if (radius) st.push('border-radius:' + (H_RADIUS[radius] || 8) + 'px');
+    cBorder(attrs.border, scope, st);
+    const inner = node.children.map(c => cNode(c, scope)).join('');
+    // Drop containers that rendered empty (e.g. a grid cell left blank by a
+    // message truncated mid-generation) so no phantom box is drawn. Unknown
+    // container tags fall through to here too, so new layout tags still render.
+    if (!inner.replace(/<[^>]*>/g, '').trim() && !/<(?:svg|img|hr)\b/i.test(inner)) return '';
+    return '<div style="' + st.join(';') + '">' + inner + '</div>';
+  }
+  // Serialise a parsed child back to source (used to re-tokenise a nested <svg>).
+  function cRawChild(node) {
+    if (node.type === 'text') return node.value;
+    if (node.type === 'expr') return '{' + node.expr + '}';
+    if (node.type === 'each') return '{#each ' + node.expr + ' as ' + node.var + (node.idx ? ',' + node.idx : '') + '}' + node.children.map(cRawChild).join('') + '{/each}';
+    if (node.type === 'if') return '{#if ' + node.expr + '}' + node.children.map(cRawChild).join('') + '{/if}';
+    if (node.type === 'el') return '<' + node.name + (node.attrs ? ' ' + node.attrs : '') + '>' + node.children.map(cRawChild).join('') + '</' + node.name + '>';
+    return '';
+  }
+  function cRender(markup) {
+    try { return cNode(svgBuildTree(svgTokenize(markup)), {}); }
+    catch (e) { return null; }
+  }
+  // Rasterise reconstructed HTML to a PNG data URI via <foreignObject> + canvas.
+  function htmlToPng(html, width) {
+    return new Promise(resolve => {
+      try {
+        const probe = document.createElement('div');
+        probe.style.cssText = 'position:fixed;left:-99999px;top:0;width:' + width + 'px;background:#fff;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:12px';
+        probe.innerHTML = html;
+        document.body.appendChild(probe);
+        const h = Math.ceil(probe.getBoundingClientRect().height) + 4;
+        document.body.removeChild(probe);
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + h + '"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:' + width + 'px;background:#fff;color:#111827;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:12px">' + html + '</div></foreignObject></svg>';
+        const img = new Image();
+        img.onload = () => { try { const sc = 3; const cv = document.createElement('canvas'); cv.width = width * sc; cv.height = h * sc; const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height); resolve(cv.toDataURL('image/png')); } catch (e) { resolve(null); } };
+        img.onerror = () => resolve(null);
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  // Replace SVG and box/grid sentinels in the built Markdown with embedded PNGs.
+  async function embedImages(md) {
+    let out = md;
+    const svgRe = /(\d+)/g;
+    const svgUris = {};
+    for (const id of [...out.matchAll(svgRe)].map(m => +m[1])) { if (svgUris[id] !== undefined) continue; const s = renderSvgString(svgSources[id] || ''); svgUris[id] = s ? await svgToPng(s, 3) : null; }
+    out = out.replace(svgRe, (_, i) => (svgUris[+i] ? '![ChatGPT diagram](' + svgUris[+i] + ')' : '_[diagram — see raw source below]_'));
+    const cRe = /(\d+)/g;
+    const cUris = {};
+    for (const id of [...out.matchAll(cRe)].map(m => +m[1])) { if (cUris[id] !== undefined) continue; const h = cRender(componentSources[id] || ''); cUris[id] = h ? await htmlToPng(h, 640) : null; }
+    out = out.replace(cRe, (_, i) => (cUris[+i] ? '![ChatGPT visual](' + cUris[+i] + ')' : '_[visual — see raw source below]_'));
     return out;
   }
 
@@ -672,11 +1174,17 @@ function setupChatGPTExporter() {
 
       setStatus('Building Markdown...');
       const nodes = linearizeActiveBranch(data);
-      const { markdown, count } = buildMarkdown(data, nodes);
+      const { markdown: rawMarkdown, count } = buildMarkdown(data, nodes);
 
       if (count === 0) {
         throw new Error('No messages found in the conversation payload.');
       }
+
+      // Rasterise inline SVG diagrams and reconstructed card/grid layouts to
+      // PNGs embedded directly in the Markdown.
+      const nImg = svgSources.length + componentSources.length;
+      if (nImg) setStatus(`Rendering ${nImg} visual(s)...`);
+      const markdown = await embedImages(rawMarkdown);
 
       const filename = getFilename(data);
       downloadMarkdown(markdown, filename);
