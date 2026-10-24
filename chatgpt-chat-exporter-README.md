@@ -153,6 +153,37 @@ their messages.
   - **the exact raw layout source is preserved** inside each visual block, in a collapsible `<details>Raw layout source</details>` section. Flattening a complex 2D diagram to Markdown necessarily loses some structure (nesting, grouping, connectors, left-to-right relationships); keeping the verbatim source means nothing is lost — it's the full-fidelity master the original picture renders from, so the diagram can be re-created from it later
 - **Endpoint churn** - If OpenAI renames the backend endpoints, the constants above need updating
 
+## Design notes: built to survive an evolving component language
+
+ChatGPT's rich-visual layout language is new and clearly still growing. The
+reconstruction is deliberately **structure-driven rather than keyed to a fixed
+list of tag names**, so it keeps working as that vocabulary expands:
+
+- **Containers are identified by exclusion, not enumeration.** A small set of
+  inline/leaf tags (`text`, `caption`, `badge`, `icon`, `divider`, `list`,
+  `table`, …) is known; *every other* paired element is treated as a layout
+  container. A brand-new tag (say `<panel>` or `<callout>`) is detected as a
+  visual region and rendered by the generic container path with no code change.
+- **Whether a block becomes a picture is decided by shape, not by name** — a
+  region is rasterised when it contains an SVG, a styled frame (background /
+  border / radius), a grid, an icon, or nested containers; a plain wrapper of
+  text just flattens to Markdown. New container tags inherit this automatically.
+- **Attributes are interpreted generically.** Spacing, colour, radius, font
+  size/weight, alignment and column counts are read from their attributes and
+  mapped to CSS; unknown values fall back sensibly. Any container declaring a
+  column count (not only `<grid>`) lays out as a grid.
+- **Graceful degradation is the default.** Unknown icons fall back (after trying
+  to clone the page's real Lucide icon); an unknown tag still renders its content
+  and styling; a message **truncated mid-generation** is recovered (the open
+  region is captured, the dangling tag dropped, empty cells omitted) instead of
+  leaking raw markup; and if anything fails to rasterise, the block degrades to a
+  placeholder with its **raw source preserved** below it.
+
+The practical upshot: when ChatGPT ships a new kind of visual, the exporter
+should render a faithful-enough picture of it on day one, and the verbatim raw
+source is always kept so nothing is ever lost even if the reconstruction isn't
+perfect.
+
 ## Privacy & Security
 
 What these scripts guarantee:

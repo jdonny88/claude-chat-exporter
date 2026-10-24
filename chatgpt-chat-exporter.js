@@ -366,10 +366,15 @@ function setupChatGPTExporter() {
   const DIAGRAM_START = '**⟦ ChatGPT visual block — flattened from a rich layout ⟧**';
   const DIAGRAM_END = '**⟦ end of visual block ⟧**';
 
-  // Paired, block-level component tags. Inline/self-closing ones (<Entity/>,
-  // <AsyncImage/>, <Cite/>, <icon/>, <divider/>) are NOT here, so a citation or
-  // entity sitting in ordinary prose never looks like the start of a diagram.
-  const BLOCK_TAG = /^(?:box|grid|grid-item|row|col|column|stack|card|section|container|group)$/i;
+  // Rather than enumerate every layout container (which couples us to ChatGPT's
+  // current tag vocabulary), we define the SMALL set of tags that are NOT layout
+  // regions — inline/leaf content and the simple list/table tags that flatten to
+  // Markdown — and treat every other paired element as a potential visual
+  // container. A new container tag ChatGPT introduces (e.g. <panel>, <callout>)
+  // is then handled with no code change: it's detected as a region and rendered
+  // by cEl's generic container path.
+  const NON_REGION_TAGS = /^(?:text|caption|badge|icon|divider|spacer|entity|cite|link|a|b|i|em|strong|code|span|br|small|sub|sup|mark|u|s|del|ins|abbr|kbd|img|image|asyncimage|asyncimagegroup|imagegroup|list|list-item|table|table-row|table-cell)$/i;
+  const isRegionContainer = n => !!n && !NON_REGION_TAGS.test(n);
 
   // Wrap each top-level rich-component region (a diagram / card grid / flow laid
   // out visually in the chat) with start/end markers, so a reader can tell where
@@ -389,10 +394,10 @@ function setupChatGPTExporter() {
         delta = 0;                                   // self-closing: no nesting
       } else if (tok[1] === '/') {
         const name = tok.slice(2).match(/[A-Za-z][\w.-]*/);
-        if (name && BLOCK_TAG.test(name[0])) delta = -1;
+        if (name && isRegionContainer(name[0])) delta = -1;
       } else {
         const name = tok.slice(1).match(/[A-Za-z][\w.-]*/);
-        if (name && BLOCK_TAG.test(name[0])) delta = 1;
+        if (name && isRegionContainer(name[0])) delta = 1;
       }
       if (delta > 0 && depth === 0) start = m.index;
       depth += delta;
@@ -412,13 +417,19 @@ function setupChatGPTExporter() {
       const [s, e] = regions[i];
       const region = text.slice(s, e);
       const hasSvg = /<svg[\s>]/i.test(region);
-      // Only genuine rich layouts (card/grid frames, styled containers, or an
-      // SVG) are worth a marked visual block; a bare <row>/<col> of plain text
-      // is left to the normal flattening so an inline label never becomes a
-      // spurious "visual block" (standalone lists/tables aren't regions at all).
+      // "Rich" = worth rendering as a picture: an SVG, a styled frame, a grid, an
+      // icon, or a nested container. A lone unstyled wrapper of plain text is not
+      // (it flattens to normal Markdown). Counted structurally, not by tag name,
+      // so this keeps working as ChatGPT's component vocabulary grows.
+      const containerOpens = (region.match(/<(?!\/)[A-Za-z][\w-]*(?:\s[^<>]*?)?>/g) || []).filter(tg => {
+        if (/\/>\s*$/.test(tg)) return false;
+        const nm = (tg.match(/<([A-Za-z][\w-]*)/) || [])[1];
+        return nm && isRegionContainer(nm) && !/^(?:svg|rect|path|circle|line|g|text|tspan|defs|marker|polygon|polyline|ellipse|clippath|lineargradient|radialgradient|stop|use|foreignobject)$/i.test(nm);
+      }).length;
       const rich = hasSvg
-        || /<(?:box|grid|grid-item|card|stack|section|container|group)\b/i.test(region)
-        || /\b(?:background|border|radius)\s*=/i.test(region);
+        || /\b(?:background|border|radius)\s*=/i.test(region)
+        || /<icon\b|<grid\b/i.test(region)
+        || containerOpens >= 2;
       if (!rich) continue;
       // Preserve the exact raw markup (the lossless master) as a source block.
       const idx = rawBlocks.push(region) - 1;
@@ -448,14 +459,30 @@ function setupChatGPTExporter() {
     return `<details><summary>Raw layout source (re-renderable)</summary>\n\n${fence}\n${src}\n${fence}\n\n</details>`;
   }
 
+  // Does this message carry a ChatGPT rich-UI component block? Rather than match
+  // a fixed list of tag names, we look for the shape of the component language —
+  // a template directive, an <svg>, a tag carrying a layout/style attribute, or a
+  // multi-word/hyphenated element tag — so newly-introduced component tags still
+  // trip the gate. (Any genuine code is protected before tags are touched, so a
+  // false positive on prose that merely contains a tag is harmless.)
+  function looksLikeComponents(text) {
+    return /\{#(?:each|if)\b/.test(text)
+      || /<svg[\s>]/i.test(text)
+      || /<[A-Za-z][\w-]*\s[^<>]*\b(?:padding|gap|radius|columns|weight|background|align|justify|marker|size|color|border|flex|width|height|textAnchor|strokeWidth|fontSize|value|query|refs|connector)\s*=/i.test(text)
+      || /<\/?(?:box|row|col|column|grid|grid-item|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|table-row|table-cell|list|list-item|entity|cite|(?:async)?image(?:group)?|panel|callout|chip|pill|tag|tile|banner|note|frame|flex|columns|stack-item)\b/i.test(text)
+      || /<[A-Za-z][\w]*-[\w-]+[\s/>]/.test(text);
+  }
+
   function cleanComponents(text) {
     if (!text) return text;
-    if (!/<(?:box|row|col|column|grid|stack|card|text|icon|caption|section|container|spacer|divider|badge|table|list|svg|Entity|Cite|(?:Async)?Image(?:Group)?|[a-z][\w]*-[\w-]*)\b|\{#(?:each|if)\b/i.test(text)) return text;
+    if (!looksLikeComponents(text)) return text;
 
-    // Drop a dangling, unterminated component/SVG tag at the very end — a message
-    // cut off mid-tag during generation would otherwise leak "<text" into the
-    // output (its region is still recovered by wrapDiagrams' end-of-text capture).
-    text = text.replace(/<\/?(?:box|row|col|column|grid|grid-item|stack|card|text|caption|section|container|spacer|divider|group|list|list-item|table|table-row|table-cell|badge|icon|svg|rect|path|circle|line|g|Entity|Cite|(?:Async)?Image(?:Group)?)(?:\s[^<>]*)?$/i, '');
+    // Drop a dangling, unterminated tag at the very end — a message cut off
+    // mid-tag during generation would otherwise leak "<text" (or any tag name)
+    // into the output. Matches only an unclosed tag at EOF (no '>' before the
+    // end), so complete tags and ordinary "a < b" prose are untouched; the
+    // region itself is still recovered by wrapDiagrams' end-of-text capture.
+    text = text.replace(/<\/?[A-Za-z][\w-]*(?:\s[^<>]*)?$/, '');
 
     // Protect code spans/blocks and (later) generated tables/lists from the
     // whitespace normalisation that follows.
@@ -890,7 +917,14 @@ function setupChatGPTExporter() {
     st.push('border:1px solid ' + H_BORDER);
   }
   function cNode(node, scope) {
-    if (node.type === 'text') { let t = cEsc(node.value).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>'); t = t.replace(/[ \t]*\n[ \t]*/g, ' ').trim(); return t ? '<div style="line-height:1.4">' + t + '</div>' : ''; }
+    if (node.type === 'text') {
+      // Keep blank-line-separated paragraphs apart (e.g. a list item's label line
+      // and its explanatory paragraph), matching how the chat lays them out.
+      const paras = node.value.split(/\n[ \t]*\n/).map(seg =>
+        cEsc(seg).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/[ \t]*\n[ \t]*/g, ' ').trim()
+      ).filter(Boolean);
+      return paras.map(pp => '<div style="line-height:1.4;margin:1px 0">' + pp + '</div>').join('');
+    }
     if (node.type === 'expr') { return cEsc(svgEval(node.expr, scope) ?? ''); }
     if (node.type === 'each') { let a = svgEval(node.expr, scope); if (!Array.isArray(a)) a = []; return a.map((it, i) => { const s = Object.assign({}, scope); s[node.var] = it; if (node.idx) s[node.idx] = i; return node.children.map(c => cNode(c, s)).join(''); }).join(''); }
     if (node.type === 'if') { return svgEval(node.expr, scope) ? node.children.map(c => cNode(c, scope)).join('') : ''; }
@@ -930,7 +964,10 @@ function setupChatGPTExporter() {
     const st = ['display:flex'];
     if (lname === 'row') st.push('flex-direction:row', 'align-items:center');
     else st.push('flex-direction:column');
-    if (lname === 'grid') { st.length = 0; const cols = +cVal(attrs, 'columns', scope) || 2; st.push('display:grid', 'grid-template-columns:repeat(' + cols + ',1fr)'); }
+    // Any container declaring a column count renders as a grid — not just the
+    // literal <grid> tag — so a future multi-column layout tag still lays out.
+    const ncols = cVal(attrs, 'columns', scope) ?? cVal(attrs, 'count', scope);
+    if (lname === 'grid' || ncols != null) { st.length = 0; const cols = +ncols || 2; st.push('display:grid', 'grid-template-columns:repeat(' + cols + ',1fr)'); }
     const gap = cSpacing(cRawVal(attrs, 'gap', scope)); if (gap) st.push('gap:' + gap);
     const pad = cSpacing(cRawVal(attrs, 'padding', scope)); if (pad) st.push('padding:' + pad);
     const align = cVal(attrs, 'align', scope); if (align) st.push('align-items:' + cFlexA(align));
@@ -941,7 +978,12 @@ function setupChatGPTExporter() {
     const bg = cVal(attrs, 'background', scope); if (bg) st.push('background:' + (H_BG[bg] || bg));
     const radius = cVal(attrs, 'radius', scope); if (radius) st.push('border-radius:' + (H_RADIUS[radius] || 8) + 'px');
     cBorder(attrs.border, scope, st);
-    return '<div style="' + st.join(';') + '">' + node.children.map(c => cNode(c, scope)).join('') + '</div>';
+    const inner = node.children.map(c => cNode(c, scope)).join('');
+    // Drop containers that rendered empty (e.g. a grid cell left blank by a
+    // message truncated mid-generation) so no phantom box is drawn. Unknown
+    // container tags fall through to here too, so new layout tags still render.
+    if (!inner.replace(/<[^>]*>/g, '').trim() && !/<(?:svg|img|hr)\b/i.test(inner)) return '';
+    return '<div style="' + st.join(';') + '">' + inner + '</div>';
   }
   // Serialise a parsed child back to source (used to re-tokenise a nested <svg>).
   function cRawChild(node) {
