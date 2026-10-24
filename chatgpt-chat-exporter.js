@@ -893,11 +893,36 @@ function setupChatGPTExporter() {
   };
   function resolveIcon(name, px, col) {
     if (ARROW_GLYPH[name]) return '<span style="font-size:' + Math.round(px * 0.95) + 'px;color:' + col + ';line-height:1">' + ARROW_GLYPH[name] + '</span>';
-    // Prefer a clone of the page's real Lucide icon (exact match to the chat).
+    // Prefer a clone of the page's own rendered icon, so it's an exact match to
+    // the chat. ChatGPT renders icons several ways (inline Lucide <path>s, or an
+    // <svg><use href="#symbol"> sprite reference, or an external /cdn sprite);
+    // we handle each: inline same-document symbols, drop external refs we can't
+    // fetch synchronously here, and only trust a clone that has real geometry —
+    // otherwise fall through to the built-in Lucide-shaped fallback.
     try {
-      const el = document.querySelector('svg.lucide-' + name + ', svg[data-lucide="' + name + '"]');
-      if (el) { const c = el.cloneNode(true); c.setAttribute('width', px); c.setAttribute('height', px); c.setAttribute('stroke', col); c.removeAttribute('class'); return new XMLSerializer().serializeToString(c); }
-    } catch (e) { /* fall through */ }
+      let el = document.querySelector('svg.lucide-' + name + ', svg[class~="lucide-' + name + '"], svg[data-lucide="' + name + '"], svg[data-icon="' + name + '"], svg[data-icon-name="' + name + '"]');
+      if (!el) {
+        const u = document.querySelector('use[href$="#' + name + '"], use[href$="/' + name + '"], use[href$="' + name + '"], use[*|href$="#' + name + '"]');
+        if (u && u.closest) el = u.closest('svg');
+      }
+      if (el) {
+        const c = el.cloneNode(true);
+        c.querySelectorAll('use').forEach(u => {
+          const href = u.getAttribute('href') || u.getAttribute('xlink:href') || '';
+          const id = href.indexOf('#') >= 0 ? href.slice(href.indexOf('#') + 1) : '';
+          const sym = id ? document.getElementById(id) : null;
+          if (sym) u.insertAdjacentHTML('beforebegin', sym.innerHTML);
+          u.remove();
+        });
+        if (c.querySelector('path,circle,rect,line,polygon,polyline,ellipse')) {
+          c.setAttribute('width', px); c.setAttribute('height', px);
+          c.removeAttribute('class'); c.removeAttribute('aria-hidden');
+          // Any currentColor (stroke or fill) in the icon resolves to this.
+          c.style.color = col;
+          return new XMLSerializer().serializeToString(c);
+        }
+      }
+    } catch (e) { /* fall through to built-in fallback */ }
     const inner = ICON_FALLBACK[name];
     if (inner) return '<svg xmlns="http://www.w3.org/2000/svg" width="' + px + '" height="' + px + '" viewBox="0 0 24 24" fill="none" stroke="' + col + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
     return '<svg xmlns="http://www.w3.org/2000/svg" width="' + px + '" height="' + px + '" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4" fill="none" stroke="' + col + '" stroke-width="1.6"/></svg>';
