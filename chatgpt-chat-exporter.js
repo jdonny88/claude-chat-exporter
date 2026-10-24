@@ -1,4 +1,12 @@
 function setupChatGPTExporter() {
+  // --- User-tunable settings -------------------------------------------------
+  // Resolution multiplier for the embedded diagram/card PNGs. 2 is the sweet
+  // spot: visually identical on a Kindle Scribe / in a PDF (which downsample to
+  // the page anyway) while keeping the .md ~40% smaller than 3. Bump to 3 for a
+  // conversation you want archival-crisp when zooming on a retina screen, or
+  // drop to 1.5 for a very diagram-heavy chat where file size matters most.
+  const IMAGE_SCALE = 2;
+
   // Status indicator
   const statusDiv = document.createElement('div');
   statusDiv.style.cssText = `
@@ -1035,7 +1043,7 @@ function setupChatGPTExporter() {
         document.body.removeChild(probe);
         const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + h + '"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:' + width + 'px;background:#fff;color:#111827;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:12px">' + html + '</div></foreignObject></svg>';
         const img = new Image();
-        img.onload = () => { try { const sc = 3; const cv = document.createElement('canvas'); cv.width = width * sc; cv.height = h * sc; const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height); resolve(cv.toDataURL('image/png')); } catch (e) { resolve(null); } };
+        img.onload = () => { try { const sc = IMAGE_SCALE; const cv = document.createElement('canvas'); cv.width = width * sc; cv.height = h * sc; const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height); resolve(cv.toDataURL('image/png')); } catch (e) { resolve(null); } };
         img.onerror = () => resolve(null);
         img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
       } catch (e) { resolve(null); }
@@ -1047,7 +1055,7 @@ function setupChatGPTExporter() {
     let out = md;
     const svgRe = /(\d+)/g;
     const svgUris = {};
-    for (const id of [...out.matchAll(svgRe)].map(m => +m[1])) { if (svgUris[id] !== undefined) continue; const s = renderSvgString(svgSources[id] || ''); svgUris[id] = s ? await svgToPng(s, 3) : null; }
+    for (const id of [...out.matchAll(svgRe)].map(m => +m[1])) { if (svgUris[id] !== undefined) continue; const s = renderSvgString(svgSources[id] || ''); svgUris[id] = s ? await svgToPng(s, IMAGE_SCALE) : null; }
     out = out.replace(svgRe, (_, i) => (svgUris[+i] ? '![ChatGPT diagram](' + svgUris[+i] + ')' : '_[diagram — see raw source below]_'));
     const cRe = /(\d+)/g;
     const cUris = {};
